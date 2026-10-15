@@ -6,11 +6,12 @@ Anonymous, mobile-friendly support forum. Flask + SQLite, plain HTML/CSS.
     cd /workspace/talk-now/app
     python3 app.py            # http://localhost:5050
     OPENAI_API_KEY=sk-... python3 app.py   # optional: use OpenAI moderation instead of local word list
-Tests: `python3 test_strikes.py && python3 test_ranking.py && python3 test_local.py`. Reset data: delete `talknow.db` (re-seeds sample posts).
+Tests: `python3 test_strikes.py && python3 test_ranking.py && python3 test_local.py && python3 test_quick.py`. Reset data: delete `talknow.db` (re-seeds sample posts).
 
 ## Features
 - Random anonymous handle (e.g. KindRiver412) stored in a session cookie; no real identity.
-- Home: choose **Personal** or **Local Insider**.
+- Home: choose **Personal**, **Local Insider** or **Quick Advice**.
+- Quick Advice: one feed of short questions (newest first), New Question (question + optional short description, Enter creates); replies, stars, rank, revisits, moderation and strikes as elsewhere. 2 sample questions seeded.
 - Personal: pick soul / spirit / body, then Light / Medium / Heavy -> lane of posts + New Post button.
 - Local Insider: enter an area (case/whitespace normalized, e.g. "  laFAYette " -> Lafayette) or tap an existing area.
   Area page: threads (sort Newest / Most replies / Recently active), New Thread (title + description, Enter creates),

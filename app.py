@@ -57,6 +57,13 @@ def init_db(conn):
                      (uid,"Try a local bakery early, the boudin goes fast.",now))
         conn.execute("INSERT INTO replies(post_id,parent_id,user_id,body,created) VALUES(3,NULL,?,?,?)",
                      (uid,"Sorry you're going through this. You're not alone here.",now))
+    if conn.execute("SELECT COUNT(*) FROM posts WHERE severity='quick'").fetchone()[0] == 0:
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute("INSERT OR IGNORE INTO users(handle,created) VALUES('TalkNow-Sample',?)", (now,))
+        uid = conn.execute("SELECT id FROM users WHERE handle='TalkNow-Sample'").fetchone()[0]
+        for t, b in [("How do I fall asleep faster?", "Mind races at night."),
+                     ("Good first book for learning to cook?", "")]:
+            conn.execute("INSERT INTO posts(user_id,severity,category,title,body,sample,created) VALUES(?,'quick','quick',?,?,1,?)", (uid, t, b, now))
     conn.commit()
 
 # ---------- Moderation ----------
@@ -230,6 +237,7 @@ def home():
     h = ("<h2>Where do you want to talk?</h2>"
          "<a class='card' style='display:block' href='/personal'><b>Personal</b><p class='meta'>Anonymous support for soul, spirit and body, from light to heavy.</p></a>"
          "<a class='card' style='display:block' href='/local'><b>Local Insider</b><p class='meta'>People here are willing to help and give advice about your area, like a good restaurant or a place to avoid.</p></a>"
+         "<a class='card' style='display:block' href='/quick'><b>Quick Advice</b><p class='meta'>Ask a quick question, get fast answers from others</p></a>"
          "<p class='meta'>You're anonymous. Nobody knows who you are.</p>")
     return page(h)
 
@@ -243,6 +251,37 @@ def personal():
             f"<a class='btn primary {s}' href='/lane/{s}/{cat}'>{LABEL[s]}</a>" for s in ["light", "mid", "heavy"]) + "</div>"
     h += "<p><a href='/'>&larr; Home</a></p>"
     return page(h)
+
+@app.route("/quick")
+def quick():
+    rows = db().execute("""SELECT p.*,u.handle,(SELECT COUNT(*) FROM replies r WHERE r.post_id=p.id) n FROM posts p
+        JOIN users u ON u.id=p.user_id WHERE p.severity='quick' ORDER BY p.id DESC""").fetchall()
+    h = "<h2>Quick Advice</h2><p class='meta'>Ask a quick question, get fast answers from others</p><a class='btn primary' href='/quick/new'>+ New Question</a>"
+    for p in rows:
+        h += (f"<div class='card'><a href='/post/{p['id']}'><b>{esc(p['title'])}</b> {'<span class=tag>sample</span>' if p['sample'] else ''}"
+              f"{'<p>' + esc(p['body'][:140]) + '</p>' if p['body'] else ''}<div class='meta'>{esc(p['handle'])} · {fmt(p['created'])} · {p['n']} answers</div></a></div>")
+    if not rows: h += "<p class='meta'>No questions yet. Ask one.</p>"
+    return page(h + "<p><a href='/'>&larr; Home</a></p>")
+
+@app.route("/quick/new", methods=["GET", "POST"])
+def new_question():
+    me = current_user(); notice = None
+    title = request.form.get("title", "").strip()[:200]; body = request.form.get("body", "").strip()[:500]
+    if request.method == "POST":
+        if ban_until(me): notice = "You're suspended and can't post right now."
+        elif not title: notice = "Please write your question."
+        else:
+            notice = handle_text(title + "\n" + body)
+            if not notice:
+                cur = db().execute("INSERT INTO posts(user_id,severity,category,title,body,created) VALUES(?,'quick','quick',?,?,?)",
+                                   (me["id"], title, body, datetime.now().isoformat(timespec="seconds")))
+                db().commit(); return redirect(f"/post/{cur.lastrowid}")
+            title = body = ""
+    h = (f"<h2>New question</h2>{RESPECT}<form method='post'>"
+         f"<input name='title' maxlength='200' placeholder='Your question' value='{esc(title)}' required autofocus>"
+         f"<textarea name='body' maxlength='500' style='min-height:60px' placeholder='Short description (optional)'>{esc(body)}</textarea>"
+         f"<button class='btn primary' type='submit'>Enter</button></form><p><a href='/quick'>&larr; Back</a></p>")
+    return page(h, notice=notice)
 
 @app.route("/local")
 def local():
@@ -384,7 +423,8 @@ def post(pid):
             out += (f"<div class='reply'><div class='meta'>{esc(r['handle'])} · {fmt(r['created'])} <span class='score'>· rank {score[r['id']]}</span></div><div>{esc(r['body'])}</div>{stars(r)}"
                     f"<details><summary>Reply</summary>{form(r['id'])}</details>{tree(r['id'])}</div>")
         return out
-    back = (f"<a href='{url_for('area', name=p['area'])}'>&larr; Local Insider › {esc(p['area'])}</a>" if p["area"]
+    back = ("<a href='/quick'>&larr; Quick Advice</a>" if p["severity"] == "quick" else
+            f"<a href='{url_for('area', name=p['area'])}'>&larr; Local Insider › {esc(p['area'])}</a>" if p["area"]
             else f"<a href='/lane/{p['severity']}/{p['category']}'>&larr; {p['category']} › {LABEL.get(p['severity'], '')}</a>")
     h = (f"<p>{back}</p>"
          f"<div class='card'><h2>{esc(p['title'])} {'<span class=tag>sample</span>' if p['sample'] else ''}</h2>"
