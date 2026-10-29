@@ -1,3 +1,5 @@
 talknow.db
 *.log
 __pycache__/
+marketplace/safetrade.db
+marketplace/uploads/
