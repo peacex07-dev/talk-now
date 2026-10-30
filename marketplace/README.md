@@ -13,13 +13,13 @@ Tests: `python3 test_escrow.py && python3 test_returns.py && python3 test_neighb
 
 Env: `SECRET_KEY` (set it in production, or sessions reset on restart), `SAFETRADE_DB`, `SAFETRADE_UPLOADS`,
 `SAFETRADE_FEE_PCT` (platform fee taken from the seller's payout on completed sales, default 5),
-`SAFETRADE_RETURN_DAYS` (no-questions-asked return window, default 14; 0 pays the seller as soon as both approve), `PORT`.
+`SAFETRADE_RETURN_DAYS` (no-questions-asked return window, default 4; 0 pays the seller as soon as both approve), `PORT`.
 
 ## How a sale works
 1. Buyer taps **Buy with Safe Transfer**. The price leaves the buyer's wallet and is held in escrow. The listing is hidden.
 2. Buyer and seller arrange pickup/shipping in the order's message thread.
 3. Seller approves ("I handed it over"). Buyer approves ("I received it as described"). Order doesn't matter.
-4. When both have approved, a 14-day return window starts. The money stays held.
+4. When both have approved, a 4-day return window starts. The money stays held.
 5. Buyer can return the item any time in the window, no reason needed. When the seller confirms they have it back,
    the buyer gets the full amount and the listing goes back on sale. No fee is charged on a return.
 6. If the window ends with no return, the seller is paid automatically (price minus the 5% fee) and can withdraw.

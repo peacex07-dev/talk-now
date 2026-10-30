@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 os.environ["SAFETRADE_DB"] = tempfile.mktemp(suffix=".db")
 os.environ["SAFETRADE_UPLOADS"] = tempfile.mkdtemp()
 import app as A
-assert A.FEE_PCT == 5 and A.RETURN_DAYS == 14   # defaults
+assert A.FEE_PCT == 5 and A.RETURN_DAYS == 4   # defaults
 
 conn = A.connect()
 uid = {r["username"]: r["id"] for r in conn.execute("SELECT * FROM users")}
@@ -27,10 +27,10 @@ a, b = bal(alice), bal(bob)
 lid, oid = sale(10000)
 assert status(oid) == "return_window" and bal(alice) == a and bal(bob) == b - 10000
 assert A.pending_payouts(conn, alice) == 9500 and A.escrow_held(conn, bob) == 10000
-assert A.release_due(conn, later(13)) == 0 and bal(alice) == a
+assert A.release_due(conn, later(3)) == 0 and bal(alice) == a
 assert refused(A.request_return, conn, oid, alice)            # seller can't "return"
 assert refused(A.cancel, conn, oid, alice) and refused(A.cancel, conn, oid, bob)
-assert A.release_due(conn, later(15)) == 1
+assert A.release_due(conn, later(5)) == 1
 assert bal(alice) == a + 9500 and status(oid) == "released" and A.pending_payouts(conn, alice) == 0
 assert conn.execute("SELECT status FROM listings WHERE id=?", (lid,)).fetchone()[0] == "sold"
 assert refused(A.request_return, conn, oid, bob)              # too late
@@ -77,7 +77,7 @@ def tok(c):
     with c.session_transaction() as s: return s["csrf"]
 def post(c, url, **data): return c.post(url, data={"csrf": tok(c), **data})
 seller, buyer = client("alice"), client("bob")
-assert b"14 days" in buyer.get("/").data and b"14 days" in buyer.get("/listing/1").data
+assert b"4 days" in buyer.get("/").data and b"4 days" in buyer.get("/listing/1").data
 lid = int(post(seller, "/sell", title="Drill", price="80").headers["Location"].rsplit("/", 1)[1])
 oid = int(post(buyer, f"/listing/{lid}/buy").headers["Location"].rsplit("/", 1)[1])
 post(seller, f"/order/{oid}/approve"); post(buyer, f"/order/{oid}/approve")

@@ -19,7 +19,7 @@ ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clot
 IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_PRICE_CENTS = 100_000_00   # $100,000 cap per listing / deposit
 FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
-RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "14"))   # no-questions-asked return window after both approve
+RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "4"))   # no-questions-asked return window after both approve
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(16)
