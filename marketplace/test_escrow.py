@@ -3,6 +3,7 @@ import os, tempfile, re
 os.environ["SAFETRADE_DB"] = tempfile.mktemp(suffix=".db")
 os.environ["SAFETRADE_UPLOADS"] = tempfile.mkdtemp()
 import app as A
+A.FEE_PCT = 0; A.RETURN_DAYS = 0   # core escrow rules; returns and fees are in test_returns.py
 
 conn = A.connect()
 uid = {r["username"]: r["id"] for r in conn.execute("SELECT * FROM users")}

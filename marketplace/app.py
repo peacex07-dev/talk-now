@@ -6,7 +6,7 @@ All money is stored as integer cents. The ledger table is the source of truth fo
 """
 import os, re, sqlite3, secrets
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, g, request, session, redirect, url_for, render_template_string, abort, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -18,7 +18,8 @@ ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clot
         "Sports": "🚲", "Toys": "🧸", "Other": "📦"}
 IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_PRICE_CENTS = 100_000_00   # $100,000 cap per listing / deposit
-FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "0"))   # platform fee taken from seller payout, e.g. 2.5
+FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
+RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "14"))   # no-questions-asked return window after both approve
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(16)
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS listings(id INTEGER PRIMARY KEY, seller_id INTEGER NO
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id),
   buyer_id INTEGER NOT NULL REFERENCES users(id), seller_id INTEGER NOT NULL REFERENCES users(id),
   amount INTEGER NOT NULL, fee INTEGER DEFAULT 0, status TEXT NOT NULL, buyer_ok INTEGER DEFAULT 0,
-  seller_ok INTEGER DEFAULT 0, dispute_by INTEGER, dispute_reason TEXT, created TEXT, closed TEXT);
+  seller_ok INTEGER DEFAULT 0, dispute_by INTEGER, dispute_reason TEXT, created TEXT, closed TEXT,
+  return_until TEXT, return_reason TEXT);
 CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), order_id INTEGER,
   kind TEXT NOT NULL, amount INTEGER NOT NULL, created TEXT);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, order_id INTEGER, user_id INTEGER, text TEXT, created TEXT);
@@ -74,6 +76,9 @@ CREATE TABLE IF NOT EXISTS help_replies(id INTEGER PRIMARY KEY, post_id INTEGER 
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)")}
+    for c in ("return_until", "return_reason"):   # databases created before returns existed
+        if c not in cols: conn.execute(f"ALTER TABLE orders ADD COLUMN {c} TEXT")
     if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
         seed_market(conn)
     if not conn.execute("SELECT COUNT(*) FROM help_posts").fetchone()[0]:
@@ -124,9 +129,13 @@ def balance(conn, uid):
     return conn.execute("SELECT COALESCE(SUM(amount),0) FROM ledger WHERE user_id=?", (uid,)).fetchone()[0]
 
 def escrow_held(conn, uid=None):
-    q = "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status IN ('funded','disputed')"
+    q = f"SELECT COALESCE(SUM(amount),0) FROM orders WHERE status IN {OPEN}"
     if uid is None: return conn.execute(q).fetchone()[0]
     return conn.execute(q + " AND buyer_id=?", (uid,)).fetchone()[0]
+
+def pending_payouts(conn, uid):
+    return conn.execute(f"SELECT COALESCE(SUM(amount-fee),0) FROM orders WHERE status IN {OPEN} AND seller_id=?",
+                        (uid,)).fetchone()[0]
 
 def log(conn, oid, uid, text):
     conn.execute("INSERT INTO events(order_id,user_id,text,created) VALUES(?,?,?,?)", (oid, uid, text, now()))
@@ -134,12 +143,16 @@ def log(conn, oid, uid, text):
 class Refused(Exception): pass
 
 # ---------- ORDER RULES ----------
-# funded   : money held. Seller approves (handed over), buyer approves (received as described).
-#            Both approved -> released to seller (minus FEE_PCT).
-#            Buyer may cancel only before either side approves; seller may cancel any time (refunds buyer).
-#            Either side may open a dispute -> 'disputed' (money frozen until an admin decides).
-# disputed : admin releases to seller or refunds buyer.
-# released / refunded : final.
+# funded           : money held. Seller approves (handed over), buyer approves (received as described).
+#                    Both approved -> return_window (or straight to released if RETURN_DAYS is 0).
+#                    Buyer may cancel only before either side approves; seller may cancel any time (refunds buyer).
+# return_window    : money still held for RETURN_DAYS. Buyer may request a return, no reason needed.
+#                    When the window ends with no return, release_due() pays the seller (minus FEE_PCT).
+# return_requested : buyer brings the item back; seller confirms they got it -> full refund, listing back on sale.
+# Any open state   : either side may open a dispute -> 'disputed' (money frozen until an admin decides).
+# disputed         : admin releases to seller or refunds buyer.
+# released / refunded : final. The fee is only ever taken on release; refunds are always the full amount.
+OPEN = "('funded','return_window','return_requested','disputed')"
 
 def buy(conn, listing_id, buyer_id):
     with tx(conn):
@@ -168,7 +181,8 @@ def _release(conn, o, by):
     conn.execute("INSERT INTO ledger(user_id,order_id,kind,amount,created) VALUES(?,?,'escrow_release',?,?)",
                  (o["seller_id"], o["id"], payout, now()))
     conn.execute("UPDATE listings SET status='sold' WHERE id=?", (o["listing_id"],))
-    log(conn, o["id"], by, f"Released {money(payout)} to seller" + (f" ({money(o['fee'])} fee)" if o["fee"] else ""))
+    log(conn, o["id"], by, ("Return window ended. " if by is None else "")
+        + f"Released {money(payout)} to seller" + (f" ({money(o['fee'])} fee)" if o["fee"] else ""))
 
 def _refund(conn, o, by, why):
     conn.execute("UPDATE orders SET status='refunded', closed=? WHERE id=?", (now(), o["id"]))
@@ -189,8 +203,12 @@ def approve(conn, oid, uid):
             else "Seller confirmed item handed over")
         o = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
         if o["buyer_ok"] and o["seller_ok"]:
-            _release(conn, o, uid)
-            return "released"
+            if RETURN_DAYS <= 0:
+                _release(conn, o, uid); return "released"
+            until = (datetime.now() + timedelta(days=RETURN_DAYS)).isoformat(timespec="seconds")
+            conn.execute("UPDATE orders SET status='return_window', return_until=? WHERE id=?", (until, oid))
+            log(conn, oid, uid, f"Both approved. {RETURN_DAYS}-day return window until {until[:10]}, then the seller is paid")
+            return "return_window"
         return "funded"
 
 def cancel(conn, oid, uid):
@@ -208,9 +226,35 @@ def dispute(conn, oid, uid, reason):
     if not reason: raise Refused("Tell us what went wrong.")
     with tx(conn):
         o = _order(conn, oid, uid)
-        if o["status"] != "funded": raise Refused("This order can't be disputed now.")
+        if o["status"] not in ("funded", "return_window", "return_requested"):
+            raise Refused("This order can't be disputed now.")
         conn.execute("UPDATE orders SET status='disputed', dispute_by=?, dispute_reason=? WHERE id=?", (uid, reason, oid))
         log(conn, oid, uid, "Opened a dispute. Funds frozen until SafeTrade reviews")
+
+def request_return(conn, oid, uid, reason=""):
+    with tx(conn):
+        o = _order(conn, oid, uid)
+        if uid != o["buyer_id"]: raise Refused("Only the buyer can return an item.")
+        if o["status"] != "return_window" or o["return_until"] < now():
+            raise Refused("The return window for this order has closed.")
+        reason = (reason or "").strip()[:500]
+        conn.execute("UPDATE orders SET status='return_requested', return_reason=? WHERE id=?", (reason, oid))
+        log(conn, oid, uid, "Buyer is returning the item" + (f": {reason}" if reason else ""))
+
+def confirm_return(conn, oid, uid):
+    with tx(conn):
+        o = _order(conn, oid, uid)
+        if uid != o["seller_id"]: raise Refused("Only the seller can confirm the item came back.")
+        if o["status"] != "return_requested": raise Refused("There's no return to confirm.")
+        _refund(conn, o, uid, "Seller got the item back")
+
+def release_due(conn, at=None):
+    """Pay sellers whose return window has ended. Runs before each request; returns how many were paid."""
+    at = at or now()
+    with tx(conn):
+        due = conn.execute("SELECT * FROM orders WHERE status='return_window' AND return_until<=?", (at,)).fetchall()
+        for o in due: _release(conn, o, None)
+    return len(due)
 
 def resolve(conn, oid, admin_id, outcome):
     with tx(conn):
@@ -243,6 +287,10 @@ def csrf_token():
     if "csrf" not in session: session["csrf"] = secrets.token_hex(16)
     return session["csrf"]
 app.jinja_env.globals["csrf"] = csrf_token
+
+@app.before_request
+def pay_due_sellers():
+    release_due(db())
 
 @app.before_request
 def check_csrf():
@@ -297,8 +345,9 @@ def page(title, tpl, **ctx):
     return render_template_string(BASE, title=title, body=body, me=me, bal=balance(db(), me["id"]) if me else 0,
                                   notice=session.pop("notice", None))
 
-STATUS_LABEL = {"funded": "In escrow", "disputed": "Disputed", "released": "Completed", "refunded": "Refunded"}
-app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL)
+STATUS_LABEL = {"funded": "In escrow", "return_window": "Return window", "return_requested": "Return requested",
+                "disputed": "Disputed", "released": "Completed", "refunded": "Refunded"}
+app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL, RETURN_DAYS=RETURN_DAYS, FEE_PCT=FEE_PCT)
 
 # ---------- Routes: auth ----------
 AUTH = """<div class="card" style="max-width:420px;margin:30px auto"><h2>{{ heading }}</h2>
@@ -351,7 +400,7 @@ BROWSE = """<form class="row" method="get" style="margin-bottom:14px">
 <select name="cat" style="flex:1;min-width:140px;margin:0"><option value="">All categories</option>
 {% for c in cats %}<option {{ 'selected' if c==cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></form>
 <div class="shield">🛡️ <b>Every purchase is protected.</b> Your payment sits in escrow. The seller only gets paid after
-<b>both</b> of you approve: the seller confirms handover and you confirm you got what was described.</div>
+<b>both</b> of you approve: the seller confirms handover and you confirm you got what was described. Changed your mind? Return it within {{ RETURN_DAYS }} days, no questions asked.</div>
 {% if not rows %}<p class="meta">No listings match.</p>{% endif %}
 <div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
 {% if l.image %}<img src="/uploads/{{ l.image }}" alt="">{% else %}{{ ICON.get(l.category, '📦') }}{% endif %}</div>
@@ -384,7 +433,8 @@ LISTING = """<div class="two"><div class="card" style="padding:0;overflow:hidden
 {% else %}<p class="meta">This item is no longer available.</p>{% endif %}
 <div class="shield"><b>How Safe Transfer works</b><ol style="margin:6px 0 0;padding-left:20px">
 <li>You pay. The money is held by SafeTrade, not the seller.</li><li>Meet up or get it shipped.</li>
-<li>Seller confirms handover, you confirm it's as described.</li><li>Only when <b>both</b> approve is the seller paid.</li></ol>
+<li>Seller confirms handover, you confirm it's as described.</li><li>Then you have <b>{{ RETURN_DAYS }} days</b> to return it, no questions asked, for a full refund.</li>
+<li>After that, the seller is paid.</li></ol>
 <p class="meta" style="margin:6px 0 0">Problem? Open a dispute and the money stays frozen until we review it.</p></div></div></div>"""
 
 @app.route("/listing/<int:lid>")
@@ -475,7 +525,7 @@ def orders():
     me = login_required(); conn = db()
     def rows(side, other):
         mine_ok = "buyer_ok" if side == "buyer_id" else "seller_ok"
-        return conn.execute(f"""SELECT o.*, l.title, u.username other, (o.status='funded' AND o.{mine_ok}=0) todo
+        return conn.execute(f"""SELECT o.*, l.title, u.username other, ((o.status='funded' AND o.{mine_ok}=0) OR (o.status='return_requested' AND '{side}'='seller_id')) todo
             FROM orders o JOIN listings l ON l.id=o.listing_id JOIN users u ON u.id=o.{other}
             WHERE o.{side}=? ORDER BY o.id DESC""", (me["id"],)).fetchall()
     def table(r, who): return render_template_string(ORDER_TABLE, rows=r, who=who)
@@ -489,18 +539,32 @@ ORDER = """<p><a href="/orders">&larr; Orders</a></p><div class="two"><div>
 <ul class="steps"><li class="done">Buyer paid {{ o.amount|money }} into escrow</li>
 <li class="{{ 'done' if o.seller_ok }}">Seller confirms the item was handed over / shipped</li>
 <li class="{{ 'done' if o.buyer_ok }}">Buyer confirms the item was received as described</li>
+<li class="{{ 'done' if o.status=='released' or (o.return_until and o.return_until <= today) }}">{{ RETURN_DAYS }}-day return window{% if o.return_until %} (until {{ o.return_until[:10] }}){% endif %}</li>
 <li class="{{ 'done' if o.status=='released' }}">Funds released to seller{% if o.fee %} ({{ (o.amount-o.fee)|money }} after {{ o.fee|money }} fee){% endif %}</li></ul>
 {% if o.status=='funded' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
-{% if not o.buyer_ok %}Only approve once you have the item and it matches the listing. <b>After both approvals the money goes to the seller and can't be pulled back.</b>{% else %}You approved. Waiting for the seller to confirm handover.{% endif %}
-{% else %}{% if not o.seller_ok %}The {{ o.amount|money }} is secured. Hand over or ship the item, then confirm.{% else %}You confirmed handover. You'll be paid as soon as the buyer approves.{% endif %}{% endif %}</div>
+{% if not o.buyer_ok %}Only approve once you have the item and it matches the listing. After both approve you still have {{ RETURN_DAYS }} days to return it for a full refund.{% else %}You approved. Waiting for the seller to confirm handover.{% endif %}
+{% else %}{% if not o.seller_ok %}The {{ o.amount|money }} is secured. Hand over or ship the item, then confirm.{% else %}You confirmed handover. Once the buyer approves, the {{ RETURN_DAYS }}-day return window starts and you're paid when it ends.{% endif %}{% endif %}</div>
 <div class="row">{% if (role=='buyer' and not o.buyer_ok) or (role=='seller' and not o.seller_ok) %}
 <form method="post" action="/order/{{ o.id }}/approve" onsubmit="return confirm('{{ 'Confirm you received the item as described?' if role=='buyer' else 'Confirm you handed over / shipped the item?' }}')"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn primary">{{ 'I received it, approve' if role=='buyer' else 'I handed it over, approve' }}</button></form>{% endif %}
 {% if role=='seller' or not (o.seller_ok or o.buyer_ok) %}<form method="post" action="/order/{{ o.id }}/cancel" onsubmit="return confirm('Cancel and refund the buyer?')"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn danger">Cancel &amp; refund</button></form>{% endif %}</div>
-<details style="margin-top:12px"><summary class="meta">Something wrong? Open a dispute</summary>
-<form method="post" action="/order/{{ o.id }}/dispute"><input type="hidden" name="csrf" value="{{ csrf() }}">
-<textarea name="reason" rows="3" required placeholder="What happened?"></textarea><button class="btn danger">Open dispute</button></form></details>
+{{ dispute_form|safe }}
+{% elif o.status=='return_window' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
+You can return this item until <b>{{ o.return_until[:10] }}</b>, no questions asked. You'll get the full {{ o.amount|money }} back once the seller confirms they have it.
+{% else %}The buyer can return this item until <b>{{ o.return_until[:10] }}</b>. If they don't, {{ (o.amount-o.fee)|money }} is paid to your wallet that day.{% endif %}</div>
+{% if role=='buyer' %}<details><summary class="btn">Return this item</summary>
+<form method="post" action="/order/{{ o.id }}/return" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="rr">Reason (optional, the seller will see it)</label><textarea id="rr" name="reason" rows="2" maxlength="500"></textarea>
+<button class="btn danger">Start return</button></form></details>{% endif %}
+{{ dispute_form|safe }}
+{% elif o.status=='return_requested' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
+Return started. Arrange with the seller to give the item back. You'll get the full {{ o.amount|money }} as soon as they confirm they have it.
+{% else %}The buyer is returning this item{% if o.return_reason %}: "{{ o.return_reason }}"{% endif %}. Once you have it back, confirm below and the buyer is refunded.
+If it comes back damaged or never arrives, open a dispute.{% endif %}</div>
+{% if role=='seller' %}<form method="post" action="/order/{{ o.id }}/return/confirm" onsubmit="return confirm('Confirm you have the item back? The buyer gets a full refund.')"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<button class="btn primary">I got it back, refund the buyer</button></form>{% endif %}
+{{ dispute_form|safe }}
 {% elif o.status=='disputed' %}<div class="shield">⚠️ Disputed by {{ 'buyer' if o.dispute_by==o.buyer_id else 'seller' }}: "{{ o.dispute_reason }}".
 Funds are frozen until SafeTrade reviews the case.</div>{% endif %}</div>
 <div class="card" style="margin-top:14px"><h3 style="margin-top:0">History</h3>{% for e in events %}
@@ -510,6 +574,10 @@ Funds are frozen until SafeTrade reviews the case.</div>{% endif %}</div>
 <form method="post" action="/order/{{ o.id }}/message"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <textarea name="body" rows="2" required maxlength="1000" placeholder="Write a message"></textarea><button class="btn">Send</button></form>
 <p class="meta">Keep payment inside SafeTrade. Anyone asking you to pay outside the app is not protected.</p></div></div>"""
+
+DISPUTE_FORM = """<details style="margin-top:12px"><summary class="meta">Something wrong? Open a dispute</summary>
+<form method="post" action="/order/{{ o.id }}/dispute"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<textarea name="reason" rows="3" required placeholder="What happened?"></textarea><button class="btn danger">Open dispute</button></form></details>"""
 
 def load_order(oid, me):
     o = db().execute("""SELECT o.*, l.title, b.username buyer, s.username seller FROM orders o
@@ -522,15 +590,18 @@ def load_order(oid, me):
 def order(oid):
     me = login_required(); o = load_order(oid, me)
     role = "buyer" if me["id"] == o["buyer_id"] else "seller" if me["id"] == o["seller_id"] else "admin"
-    events = db().execute("SELECT e.*, u.username FROM events e JOIN users u ON u.id=e.user_id WHERE order_id=? ORDER BY e.id", (oid,)).fetchall()
+    events = db().execute("""SELECT e.*, COALESCE(u.username,'SafeTrade') username FROM events e
+        LEFT JOIN users u ON u.id=e.user_id WHERE order_id=? ORDER BY e.id""", (oid,)).fetchall()
     msgs = db().execute("SELECT m.*, u.username FROM messages m JOIN users u ON u.id=m.user_id WHERE order_id=? ORDER BY m.id", (oid,)).fetchall()
-    return page("Order #%d" % oid, ORDER, o=o, role=role, events=events, msgs=msgs)
+    dispute_form = render_template_string(DISPUTE_FORM, o=o)
+    return page("Order #%d" % oid, ORDER, o=o, role=role, events=events, msgs=msgs, today=now(), dispute_form=dispute_form)
 
 def order_action(oid, fn, ok_msg):
     me = login_required()
     try:
         res = fn(db(), oid, me["id"])
-        flash("Both sides approved. Funds released to the seller." if res == "released" else ok_msg)
+        flash({"released": "Both sides approved. Funds released to the seller.",
+               "return_window": f"Both sides approved. The buyer has {RETURN_DAYS} days to return it, then the seller is paid."}.get(res, ok_msg))
     except Refused as e:
         flash(str(e), "err")
     return redirect(url_for("order", oid=oid))
@@ -540,6 +611,14 @@ def approve_route(oid): return order_action(oid, approve, "Approval recorded. Wa
 
 @app.route("/order/<int:oid>/cancel", methods=["POST"])
 def cancel_route(oid): return order_action(oid, cancel, "Order cancelled and buyer refunded.")
+
+@app.route("/order/<int:oid>/return", methods=["POST"])
+def return_route(oid):
+    return order_action(oid, lambda c, o, u: request_return(c, o, u, request.form.get("reason")),
+                        "Return started. Give the item back to the seller; you're refunded when they confirm.")
+
+@app.route("/order/<int:oid>/return/confirm", methods=["POST"])
+def confirm_return_route(oid): return order_action(oid, confirm_return, "Return confirmed. The buyer has been refunded.")
 
 @app.route("/order/<int:oid>/dispute", methods=["POST"])
 def dispute_route(oid):
@@ -666,7 +745,7 @@ def neighbor_status(pid):
 
 # ---------- Routes: wallet ----------
 WALLET = """<div class="two"><div class="card"><h2 style="margin-top:0">Wallet</h2>
-<div class="price" style="font-size:32px">{{ bal|money }}</div><p class="meta">Available · {{ held|money }} of your payments held in escrow</p>
+<div class="price" style="font-size:32px">{{ bal|money }}</div><p class="meta">Available · {{ held|money }} of your payments held in escrow{% if pending %} · {{ pending|money }} in sales waiting to be paid out{% endif %}</p>
 <form method="post" action="/wallet/deposit" class="row"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <input name="amount" placeholder="Amount" inputmode="decimal" required style="flex:1;margin:0"><button class="btn primary">Add funds</button></form><br>
 <form method="post" action="/wallet/withdraw" class="row"><input type="hidden" name="csrf" value="{{ csrf() }}">
@@ -682,7 +761,7 @@ LEDGER_LABEL = {"deposit": "Added funds", "withdraw": "Withdrawal", "escrow_hold
 def wallet():
     me = login_required(); conn = db()
     rows = conn.execute("SELECT * FROM ledger WHERE user_id=? ORDER BY id DESC LIMIT 100", (me["id"],)).fetchall()
-    return page("Wallet", WALLET, bal=balance(conn, me["id"]), held=escrow_held(conn, me["id"]), rows=rows, labels=LEDGER_LABEL)
+    return page("Wallet", WALLET, bal=balance(conn, me["id"]), held=escrow_held(conn, me["id"]), pending=pending_payouts(conn, me["id"]), rows=rows, labels=LEDGER_LABEL)
 
 @app.route("/wallet/<op>", methods=["POST"])
 def wallet_op(op):

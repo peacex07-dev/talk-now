@@ -9,22 +9,28 @@ once **both** buyer and seller approve. Flask + SQLite, plain HTML/CSS, mobile-f
     python3 app.py                      # http://localhost:5080
 Demo logins: `alice / demo1234`, `bob / demo1234` (each starts with $500 demo money), `admin / admin1234`
 (set `SAFETRADE_ADMIN_PW` before first run to change it). Reset: delete `safetrade.db`.
-Tests: `python3 test_escrow.py && python3 test_neighbors.py`.
+Tests: `python3 test_escrow.py && python3 test_returns.py && python3 test_neighbors.py`.
 
 Env: `SECRET_KEY` (set it in production, or sessions reset on restart), `SAFETRADE_DB`, `SAFETRADE_UPLOADS`,
-`SAFETRADE_FEE_PCT` (platform fee taken from the seller's payout, default 0), `PORT`.
+`SAFETRADE_FEE_PCT` (platform fee taken from the seller's payout on completed sales, default 5),
+`SAFETRADE_RETURN_DAYS` (no-questions-asked return window, default 14; 0 pays the seller as soon as both approve), `PORT`.
 
 ## How a sale works
 1. Buyer taps **Buy with Safe Transfer**. The price leaves the buyer's wallet and is held in escrow. The listing is hidden.
 2. Buyer and seller arrange pickup/shipping in the order's message thread.
 3. Seller approves ("I handed it over"). Buyer approves ("I received it as described"). Order doesn't matter.
-4. When both have approved, the money is released to the seller's wallet. Seller can withdraw.
+4. When both have approved, a 14-day return window starts. The money stays held.
+5. Buyer can return the item any time in the window, no reason needed. When the seller confirms they have it back,
+   the buyer gets the full amount and the listing goes back on sale. No fee is charged on a return.
+6. If the window ends with no return, the seller is paid automatically (price minus the 5% fee) and can withdraw.
 
 | Situation | Who can do what |
 |---|---|
 | Neither approved yet | Buyer or seller can cancel, buyer is refunded, listing goes back on sale |
 | One side approved | Seller can still cancel and refund; buyer can't (they'd keep item and money) |
-| Anything wrong | Either side opens a dispute: funds are frozen |
+| Return window | Buyer can start a return; nobody can cancel |
+| Return started | Seller confirms "I got it back" and the buyer is refunded; never auto-paid to the seller |
+| Anything wrong (incl. item returned damaged) | Either side opens a dispute: funds are frozen |
 | Disputed | Admin (`/admin`) refunds buyer or releases to seller |
 | Released / refunded | Final |
 
