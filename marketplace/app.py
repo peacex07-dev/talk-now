@@ -19,13 +19,15 @@ ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clot
 IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_PRICE_CENTS = 100_000_00   # $100,000 cap per listing / deposit
 FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
-RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "4"))   # no-questions-asked return window after both approve
+RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "1"))   # no-questions-asked return window after both approve
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(16)
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
 def now(): return datetime.now().isoformat(timespec="seconds")
+def days(n): return f"{n} day" if n == 1 else f"{n} days"
+def when(ts): return ts[:16].replace("T", " ") if ts else ""
 
 # ---------- DB ----------
 def connect():
@@ -124,6 +126,7 @@ def parse_money(s):
 
 def money(c): return f"${c/100:,.2f}"
 app.jinja_env.filters["money"] = money
+app.jinja_env.filters["when"] = when
 
 def balance(conn, uid):
     return conn.execute("SELECT COALESCE(SUM(amount),0) FROM ledger WHERE user_id=?", (uid,)).fetchone()[0]
@@ -207,7 +210,7 @@ def approve(conn, oid, uid):
                 _release(conn, o, uid); return "released"
             until = (datetime.now() + timedelta(days=RETURN_DAYS)).isoformat(timespec="seconds")
             conn.execute("UPDATE orders SET status='return_window', return_until=? WHERE id=?", (until, oid))
-            log(conn, oid, uid, f"Both approved. {RETURN_DAYS}-day return window until {until[:10]}, then the seller is paid")
+            log(conn, oid, uid, f"Both approved. Buyer can return it until {when(until)}, then the seller is paid")
             return "return_window"
         return "funded"
 
@@ -347,7 +350,7 @@ def page(title, tpl, **ctx):
 
 STATUS_LABEL = {"funded": "In escrow", "return_window": "Return window", "return_requested": "Return requested",
                 "disputed": "Disputed", "released": "Completed", "refunded": "Refunded"}
-app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL, RETURN_DAYS=RETURN_DAYS, FEE_PCT=FEE_PCT)
+app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL, RETURN_PERIOD=days(RETURN_DAYS), FEE_PCT=FEE_PCT)
 
 # ---------- Routes: auth ----------
 AUTH = """<div class="card" style="max-width:420px;margin:30px auto"><h2>{{ heading }}</h2>
@@ -400,7 +403,7 @@ BROWSE = """<form class="row" method="get" style="margin-bottom:14px">
 <select name="cat" style="flex:1;min-width:140px;margin:0"><option value="">All categories</option>
 {% for c in cats %}<option {{ 'selected' if c==cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></form>
 <div class="shield">🛡️ <b>Every purchase is protected.</b> Your payment sits in escrow. The seller only gets paid after
-<b>both</b> of you approve: the seller confirms handover and you confirm you got what was described. Changed your mind? Return it within {{ RETURN_DAYS }} days, no questions asked.</div>
+<b>both</b> of you approve: the seller confirms handover and you confirm you got what was described. Changed your mind? Return it within {{ RETURN_PERIOD }}, no questions asked.</div>
 {% if not rows %}<p class="meta">No listings match.</p>{% endif %}
 <div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
 {% if l.image %}<img src="/uploads/{{ l.image }}" alt="">{% else %}{{ ICON.get(l.category, '📦') }}{% endif %}</div>
@@ -433,7 +436,7 @@ LISTING = """<div class="two"><div class="card" style="padding:0;overflow:hidden
 {% else %}<p class="meta">This item is no longer available.</p>{% endif %}
 <div class="shield"><b>How Safe Transfer works</b><ol style="margin:6px 0 0;padding-left:20px">
 <li>You pay. The money is held by SafeTrade, not the seller.</li><li>Meet up or get it shipped.</li>
-<li>Seller confirms handover, you confirm it's as described.</li><li>Then you have <b>{{ RETURN_DAYS }} days</b> to return it, no questions asked, for a full refund.</li>
+<li>Seller confirms handover, you confirm it's as described.</li><li>Then you have <b>{{ RETURN_PERIOD }}</b> to return it, no questions asked, for a full refund.</li>
 <li>After that, the seller is paid.</li></ol>
 <p class="meta" style="margin:6px 0 0">Problem? Open a dispute and the money stays frozen until we review it.</p></div></div></div>"""
 
@@ -539,11 +542,11 @@ ORDER = """<p><a href="/orders">&larr; Orders</a></p><div class="two"><div>
 <ul class="steps"><li class="done">Buyer paid {{ o.amount|money }} into escrow</li>
 <li class="{{ 'done' if o.seller_ok }}">Seller confirms the item was handed over / shipped</li>
 <li class="{{ 'done' if o.buyer_ok }}">Buyer confirms the item was received as described</li>
-<li class="{{ 'done' if o.status=='released' or (o.return_until and o.return_until <= today) }}">{{ RETURN_DAYS }}-day return window{% if o.return_until %} (until {{ o.return_until[:10] }}){% endif %}</li>
+<li class="{{ 'done' if o.status=='released' or (o.return_until and o.return_until <= today) }}">{{ RETURN_PERIOD }} to return it{% if o.return_until %} (until {{ o.return_until|when }}){% endif %}</li>
 <li class="{{ 'done' if o.status=='released' }}">Funds released to seller{% if o.fee %} ({{ (o.amount-o.fee)|money }} after {{ o.fee|money }} fee){% endif %}</li></ul>
 {% if o.status=='funded' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
-{% if not o.buyer_ok %}Only approve once you have the item and it matches the listing. After both approve you still have {{ RETURN_DAYS }} days to return it for a full refund.{% else %}You approved. Waiting for the seller to confirm handover.{% endif %}
-{% else %}{% if not o.seller_ok %}The {{ o.amount|money }} is secured. Hand over or ship the item, then confirm.{% else %}You confirmed handover. Once the buyer approves, the {{ RETURN_DAYS }}-day return window starts and you're paid when it ends.{% endif %}{% endif %}</div>
+{% if not o.buyer_ok %}Only approve once you have the item and it matches the listing. After both approve you still have {{ RETURN_PERIOD }} to return it for a full refund.{% else %}You approved. Waiting for the seller to confirm handover.{% endif %}
+{% else %}{% if not o.seller_ok %}The {{ o.amount|money }} is secured. Hand over or ship the item, then confirm.{% else %}You confirmed handover. Once the buyer approves, the buyer has {{ RETURN_PERIOD }} to return it, then you're paid.{% endif %}{% endif %}</div>
 <div class="row">{% if (role=='buyer' and not o.buyer_ok) or (role=='seller' and not o.seller_ok) %}
 <form method="post" action="/order/{{ o.id }}/approve" onsubmit="return confirm('{{ 'Confirm you received the item as described?' if role=='buyer' else 'Confirm you handed over / shipped the item?' }}')"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn primary">{{ 'I received it, approve' if role=='buyer' else 'I handed it over, approve' }}</button></form>{% endif %}
@@ -551,8 +554,8 @@ ORDER = """<p><a href="/orders">&larr; Orders</a></p><div class="two"><div>
 <button class="btn danger">Cancel &amp; refund</button></form>{% endif %}</div>
 {{ dispute_form|safe }}
 {% elif o.status=='return_window' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
-You can return this item until <b>{{ o.return_until[:10] }}</b>, no questions asked. You'll get the full {{ o.amount|money }} back once the seller confirms they have it.
-{% else %}The buyer can return this item until <b>{{ o.return_until[:10] }}</b>. If they don't, {{ (o.amount-o.fee)|money }} is paid to your wallet that day.{% endif %}</div>
+You can return this item until <b>{{ o.return_until|when }}</b>, no questions asked. You'll get the full {{ o.amount|money }} back once the seller confirms they have it.
+{% else %}The buyer can return this item until <b>{{ o.return_until|when }}</b>. If they don't, {{ (o.amount-o.fee)|money }} is paid to your wallet that day.{% endif %}</div>
 {% if role=='buyer' %}<details><summary class="btn">Return this item</summary>
 <form method="post" action="/order/{{ o.id }}/return" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <label for="rr">Reason (optional, the seller will see it)</label><textarea id="rr" name="reason" rows="2" maxlength="500"></textarea>
@@ -601,7 +604,7 @@ def order_action(oid, fn, ok_msg):
     try:
         res = fn(db(), oid, me["id"])
         flash({"released": "Both sides approved. Funds released to the seller.",
-               "return_window": f"Both sides approved. The buyer has {RETURN_DAYS} days to return it, then the seller is paid."}.get(res, ok_msg))
+               "return_window": f"Both sides approved. The buyer has {days(RETURN_DAYS)} to return it, then the seller is paid."}.get(res, ok_msg))
     except Refused as e:
         flash(str(e), "err")
     return redirect(url_for("order", oid=oid))
