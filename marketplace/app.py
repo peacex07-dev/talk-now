@@ -21,8 +21,12 @@ MAX_PRICE_CENTS = 100_000_00   # $100,000 cap per listing / deposit
 FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
 RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "1"))   # no-questions-asked return window after both approve
 
+DEMO_DATA = os.environ.get("SAFETRADE_DEMO_DATA", "1") != "0"   # 0 on a public site: no alice/bob, no sample posts
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(16)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=os.environ.get("SAFETRADE_SECURE_COOKIES") == "1")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
 def now(): return datetime.now().isoformat(timespec="seconds")
@@ -77,43 +81,46 @@ CREATE TABLE IF NOT EXISTS help_replies(id INTEGER PRIMARY KEY, post_id INTEGER 
 """
 
 def init_db(conn):
+    """Safe to run from several server workers at once: everything after CREATE runs under one write lock."""
     conn.executescript(SCHEMA)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)")}
-    for c in ("return_until", "return_reason"):   # databases created before returns existed
-        if c not in cols: conn.execute(f"ALTER TABLE orders ADD COLUMN {c} TEXT")
-    if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-        seed_market(conn)
-    if not conn.execute("SELECT COUNT(*) FROM help_posts").fetchone()[0]:
-        seed_neighbors(conn)
+    with tx(conn):
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)")}
+        for c in ("return_until", "return_reason"):   # databases created before returns existed
+            if c not in cols: conn.execute(f"ALTER TABLE orders ADD COLUMN {c} TEXT")
+        if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+            seed_market(conn)
+        if not conn.execute("SELECT COUNT(*) FROM help_posts").fetchone()[0]:
+            seed_neighbors(conn)
 
 def seed_neighbors(conn):
     ids = dict(conn.execute("SELECT username, id FROM users WHERE username IN ('alice','bob')").fetchall())
     if len(ids) < 2: return
-    with tx(conn):
-        for who, k, t, b, loc in [
-            ("bob", "borrow", "Anyone have a pressure washer I can borrow?", "Just need it for a Saturday to clean the driveway. Will bring it back clean and full of gas.", "Baton Rouge, LA"),
-            ("alice", "free", "Free: old wooden pallets, about 10", "Behind my garage. Great for garden beds or firewood. Come get them.", "Lafayette, LA"),
-            ("alice", "need", "Need a hand moving a couch Sunday", "Two-person job, 20 minutes. I'll buy lunch.", "Lafayette, LA"),
-            ("bob", "free", "Free: box of mason jars and canning lids", "Cleaning out my mom's pantry. Somebody who cans should have these.", "Baton Rouge, LA")]:
-            conn.execute("INSERT INTO help_posts(user_id,kind,title,body,location,created) VALUES(?,?,?,?,?,?)",
-                         (ids[who], k, t, b, loc, now()))
+    for who, k, t, b, loc in [
+        ("bob", "borrow", "Anyone have a pressure washer I can borrow?", "Just need it for a Saturday to clean the driveway. Will bring it back clean and full of gas.", "Baton Rouge, LA"),
+        ("alice", "free", "Free: old wooden pallets, about 10", "Behind my garage. Great for garden beds or firewood. Come get them.", "Lafayette, LA"),
+        ("alice", "need", "Need a hand moving a couch Sunday", "Two-person job, 20 minutes. I'll buy lunch.", "Lafayette, LA"),
+        ("bob", "free", "Free: box of mason jars and canning lids", "Cleaning out my mom's pantry. Somebody who cans should have these.", "Baton Rouge, LA")]:
+        conn.execute("INSERT INTO help_posts(user_id,kind,title,body,location,created) VALUES(?,?,?,?,?,?)",
+                     (ids[who], k, t, b, loc, now()))
 
 def seed_market(conn):
-    with tx(conn):
-        ids = {}
-        for name, pw, adm in [("admin", os.environ.get("SAFETRADE_ADMIN_PW", "admin1234"), 1),
-                              ("alice", "demo1234", 0), ("bob", "demo1234", 0)]:
-            ids[name] = conn.execute("INSERT INTO users(username,pw,is_admin,created) VALUES(?,?,?,?)",
-                                     (name, generate_password_hash(pw), adm, now())).lastrowid
-        for name in ("alice", "bob"):
-            conn.execute("INSERT INTO ledger(user_id,kind,amount,created) VALUES(?,'deposit',50000,?)", (ids[name], now()))
-        for who, t, b, p, c, loc in [
-            ("alice", "iPhone 14, 128GB", "Great condition, always in a case. Charger included.", 42000, "Electronics", "Lafayette, LA"),
-            ("alice", "Mid-century armchair", "Teal fabric, solid wood legs. Pickup only.", 15000, "Furniture", "Lafayette, LA"),
-            ("bob", "Trek road bike", "54cm frame, new tires last spring.", 38000, "Sports", "Baton Rouge, LA"),
-            ("bob", "LEGO Millennium Falcon", "Complete with box and manual.", 9500, "Toys", "Baton Rouge, LA")]:
-            conn.execute("INSERT INTO listings(seller_id,title,body,price,category,location,created) VALUES(?,?,?,?,?,?,?)",
-                         (ids[who], t, b, p, c, loc, now()))
+    admin_pw = os.environ.get("SAFETRADE_ADMIN_PW") or ("admin1234" if DEMO_DATA else None)
+    if not admin_pw: raise RuntimeError("Set SAFETRADE_ADMIN_PW before the first run of a public site.")
+    conn.execute("INSERT INTO users(username,pw,is_admin,created) VALUES('admin',?,1,?)", (generate_password_hash(admin_pw), now()))
+    if not DEMO_DATA: return
+    ids = {}
+    for name, pw, adm in [("alice", "demo1234", 0), ("bob", "demo1234", 0)]:
+        ids[name] = conn.execute("INSERT INTO users(username,pw,is_admin,created) VALUES(?,?,?,?)",
+                                 (name, generate_password_hash(pw), adm, now())).lastrowid
+    for name in ("alice", "bob"):
+        conn.execute("INSERT INTO ledger(user_id,kind,amount,created) VALUES(?,'deposit',50000,?)", (ids[name], now()))
+    for who, t, b, p, c, loc in [
+        ("alice", "iPhone 14, 128GB", "Great condition, always in a case. Charger included.", 42000, "Electronics", "Lafayette, LA"),
+        ("alice", "Mid-century armchair", "Teal fabric, solid wood legs. Pickup only.", 15000, "Furniture", "Lafayette, LA"),
+        ("bob", "Trek road bike", "54cm frame, new tires last spring.", 38000, "Sports", "Baton Rouge, LA"),
+        ("bob", "LEGO Millennium Falcon", "Complete with box and manual.", 9500, "Toys", "Baton Rouge, LA")]:
+        conn.execute("INSERT INTO listings(seller_id,title,body,price,category,location,created) VALUES(?,?,?,?,?,?,?)",
+                     (ids[who], t, b, p, c, loc, now()))
 
 # ---------- Money ----------
 def parse_money(s):
@@ -335,12 +342,14 @@ label{font-weight:600;font-size:14px}form.inline{display:inline}.row{display:fle
 .two{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:start}@media(max-width:760px){.two{grid-template-columns:1fr}}
 table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
 .msg{padding:8px 10px;border-radius:8px;background:var(--bg);margin:6px 0}
+.testmode{background:#fff3e0;color:#7a3405;text-align:center;font-size:14px;padding:8px 16px}
 </style></head><body><header><nav><a class="logo" href="/">🛡️ SafeTrade</a>
 {% if me %}<a href="/">Browse</a><a href="/sell">Sell</a><a href="/neighbors">Neighbors</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a>
 {% if me.is_admin %}<a href="/admin">Admin</a>{% endif %}
 <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf() }}"><button class="btn">Log out</button></form>
 {% else %}<a href="/neighbors">Neighbors</a><a href="/login">Log in</a><a class="btn primary" href="/signup">Sign up</a>{% endif %}
-</nav></header><main>{% if notice %}<div class="notice {{ 'err' if notice[0]=='err' }}">{{ notice[1] }}</div>{% endif %}{{ body|safe }}</main></body></html>"""
+</nav></header><div class="testmode">Test version: wallet money is pretend. Don't pay anyone real money through this site yet.</div>
+<main>{% if notice %}<div class="notice {{ 'err' if notice[0]=='err' }}">{{ notice[1] }}</div>{% endif %}{{ body|safe }}</main></body></html>"""
 
 def page(title, tpl, **ctx):
     me = current_user()
@@ -359,7 +368,7 @@ AUTH = """<div class="card" style="max-width:420px;margin:30px auto"><h2>{{ head
 <label>Password</label><input name="password" type="password" required minlength="{{ 8 if signup else 1 }}">
 <button class="btn primary">{{ heading }}</button></form>
 <p class="meta">{% if signup %}Have an account? <a href="/login">Log in</a>{% else %}New here? <a href="/signup">Sign up</a>
-<br>Demo accounts: alice / demo1234, bob / demo1234{% endif %}</p></div>"""
+{% if demo %}<br>Demo accounts: alice / demo1234, bob / demo1234{% endif %}{% endif %}</p></div>"""
 
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
@@ -390,8 +399,8 @@ def login():
             start_session(row["id"])
             return redirect(safe_next(request.args.get("next")))
         flash("Wrong username or password.", "err")
-        return page("Log in", AUTH, heading="Log in", signup=False, username=u)
-    return page("Log in", AUTH, heading="Log in", signup=False)
+        return page("Log in", AUTH, heading="Log in", signup=False, username=u, demo=DEMO_DATA)
+    return page("Log in", AUTH, heading="Log in", signup=False, demo=DEMO_DATA)
 
 @app.route("/logout", methods=["POST"])
 def logout():

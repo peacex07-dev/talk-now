@@ -9,11 +9,17 @@ once **both** buyer and seller approve. Flask + SQLite, plain HTML/CSS, mobile-f
     python3 app.py                      # http://localhost:5080
 Demo logins: `alice / demo1234`, `bob / demo1234` (each starts with $500 demo money), `admin / admin1234`
 (set `SAFETRADE_ADMIN_PW` before first run to change it). Reset: delete `safetrade.db`.
-Tests: `python3 test_escrow.py && python3 test_returns.py && python3 test_neighbors.py`.
+Tests: `python3 test_escrow.py && python3 test_returns.py && python3 test_neighbors.py && python3 test_public.py`.
 
 Env: `SECRET_KEY` (set it in production, or sessions reset on restart), `SAFETRADE_DB`, `SAFETRADE_UPLOADS`,
 `SAFETRADE_FEE_PCT` (platform fee taken from the seller's payout on completed sales, default 5),
 `SAFETRADE_RETURN_DAYS` (no-questions-asked return window, default 1; 0 pays the seller as soon as both approve), `PORT`.
+
+## Put it online (Render)
+`render.yaml` at the repo root sets everything up: Render dashboard > New > Blueprint > pick this repo and branch,
+enter an admin password when asked, Apply. About $7.25/month (Starter instance + 1 GB disk for the database and photos).
+The public site starts empty: no alice/bob demo accounts (`SAFETRADE_DEMO_DATA=0`), only `admin` with your password.
+Every page shows a "test version, pretend money" banner until real payments (Stripe Connect) are wired in.
 
 ## How a sale works
 1. Buyer taps **Buy with Safe Transfer**. The price leaves the buyer's wallet and is held in escrow. The listing is hidden.

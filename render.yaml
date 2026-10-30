@@ -1,0 +1,27 @@
+# Render Blueprint for SafeTrade (marketplace/). New > Blueprint in the Render dashboard, pick this repo.
+services:
+  - type: web
+    name: safetrade
+    runtime: python
+    rootDir: marketplace
+    plan: starter            # a persistent disk needs a paid plan; free instances lose all data on restart
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 2 --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /
+    disk:
+      name: safetrade-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SAFETRADE_ADMIN_PW
+        sync: false          # Render asks for it when you create the Blueprint
+      - key: SAFETRADE_DEMO_DATA
+        value: "0"
+      - key: SAFETRADE_DB
+        value: /var/data/safetrade.db
+      - key: SAFETRADE_UPLOADS
+        value: /var/data/uploads
+      - key: SAFETRADE_SECURE_COOKIES
+        value: "1"
