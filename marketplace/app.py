@@ -332,7 +332,7 @@ label{font-weight:600;font-size:14px}form.inline{display:inline}.row{display:fle
 .steps{list-style:none;padding:0;margin:0}.steps li{padding:8px 0 8px 32px;position:relative;border-left:2px solid var(--line);margin-left:10px}
 .steps li:before{content:"";position:absolute;left:-9px;top:10px;width:16px;height:16px;border-radius:50%;background:var(--card);border:2px solid var(--line)}
 .steps li.done:before{background:var(--brand);border-color:var(--brand)}.steps li.done{border-color:var(--brand)}
-.two{display:grid;grid-template-columns:1.3fr 1fr;gap:16px}@media(max-width:760px){.two{grid-template-columns:1fr}}
+.two{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:start}@media(max-width:760px){.two{grid-template-columns:1fr}}
 table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
 .msg{padding:8px 10px;border-radius:8px;background:var(--bg);margin:6px 0}
 </style></head><body><header><nav><a class="logo" href="/">🛡️ SafeTrade</a>
@@ -555,7 +555,7 @@ ORDER = """<p><a href="/orders">&larr; Orders</a></p><div class="two"><div>
 {{ dispute_form|safe }}
 {% elif o.status=='return_window' and role!='admin' %}<div class="shield">{% if role=='buyer' %}
 You can return this item until <b>{{ o.return_until|when }}</b>, no questions asked. You'll get the full {{ o.amount|money }} back once the seller confirms they have it.
-{% else %}The buyer can return this item until <b>{{ o.return_until|when }}</b>. If they don't, {{ (o.amount-o.fee)|money }} is paid to your wallet that day.{% endif %}</div>
+{% else %}The buyer can return this item until <b>{{ o.return_until|when }}</b>. If they don't, {{ (o.amount-o.fee)|money }} is paid to your wallet at that time.{% endif %}</div>
 {% if role=='buyer' %}<details><summary class="btn">Return this item</summary>
 <form method="post" action="/order/{{ o.id }}/return" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <label for="rr">Reason (optional, the seller will see it)</label><textarea id="rr" name="reason" rows="2" maxlength="500"></textarea>
