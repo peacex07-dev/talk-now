@@ -9,7 +9,7 @@ once **both** buyer and seller approve. Flask + SQLite, plain HTML/CSS, mobile-f
     python3 app.py                      # http://localhost:5080
 Demo logins: `alice / demo1234`, `bob / demo1234` (each starts with $500 demo money), `admin / admin1234`
 (set `SAFETRADE_ADMIN_PW` before first run to change it). Reset: delete `safetrade.db`.
-Tests: `python3 test_escrow.py`.
+Tests: `python3 test_escrow.py && python3 test_neighbors.py`.
 
 Env: `SECRET_KEY` (set it in production, or sessions reset on restart), `SAFETRADE_DB`, `SAFETRADE_UPLOADS`,
 `SAFETRADE_FEE_PCT` (platform fee taken from the seller's payout, default 0), `PORT`.
@@ -27,6 +27,12 @@ Env: `SECRET_KEY` (set it in production, or sessions reset on restart), `SAFETRA
 | Anything wrong | Either side opens a dispute: funds are frozen |
 | Disputed | Admin (`/admin`) refunds buyer or releases to seller |
 | Released / refunded | Final |
+
+## Neighbors (no money)
+`/neighbors` is a community board for things nobody is selling: **Need a hand** (moving, a ride, advice),
+**Borrow** (tools, a trailer, a ladder) and **Free stuff** (what you'd toss that someone else could use).
+Anyone can browse; logged-in users post (optional photo), reply, and the poster marks it done, reopens or deletes it.
+Done posts sink to the bottom. Sample posts are seeded on first run.
 
 ## Design notes
 - Money is integer cents. The `ledger` table (deposit, withdraw, escrow_hold, escrow_release, escrow_refund) is the

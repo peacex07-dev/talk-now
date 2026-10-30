@@ -66,12 +66,32 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY, user_id INTEGER REFERE
   kind TEXT NOT NULL, amount INTEGER NOT NULL, created TEXT);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, order_id INTEGER, user_id INTEGER, text TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, order_id INTEGER, user_id INTEGER, body TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS help_posts(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL,
+  title TEXT NOT NULL, body TEXT, location TEXT, image TEXT, status TEXT DEFAULT 'open', created TEXT);
+CREATE TABLE IF NOT EXISTS help_replies(id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES help_posts(id),
+  user_id INTEGER NOT NULL REFERENCES users(id), body TEXT, created TEXT);
 """
 
 def init_db(conn):
     conn.executescript(SCHEMA)
-    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-        return
+    if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+        seed_market(conn)
+    if not conn.execute("SELECT COUNT(*) FROM help_posts").fetchone()[0]:
+        seed_neighbors(conn)
+
+def seed_neighbors(conn):
+    ids = dict(conn.execute("SELECT username, id FROM users WHERE username IN ('alice','bob')").fetchall())
+    if len(ids) < 2: return
+    with tx(conn):
+        for who, k, t, b, loc in [
+            ("bob", "borrow", "Anyone have a pressure washer I can borrow?", "Just need it for a Saturday to clean the driveway. Will bring it back clean and full of gas.", "Baton Rouge, LA"),
+            ("alice", "free", "Free: old wooden pallets, about 10", "Behind my garage. Great for garden beds or firewood. Come get them.", "Lafayette, LA"),
+            ("alice", "need", "Need a hand moving a couch Sunday", "Two-person job, 20 minutes. I'll buy lunch.", "Lafayette, LA"),
+            ("bob", "free", "Free: box of mason jars and canning lids", "Cleaning out my mom's pantry. Somebody who cans should have these.", "Baton Rouge, LA")]:
+            conn.execute("INSERT INTO help_posts(user_id,kind,title,body,location,created) VALUES(?,?,?,?,?,?)",
+                         (ids[who], k, t, b, loc, now()))
+
+def seed_market(conn):
     with tx(conn):
         ids = {}
         for name, pw, adm in [("admin", os.environ.get("SAFETRADE_ADMIN_PW", "admin1234"), 1),
@@ -265,10 +285,10 @@ label{font-weight:600;font-size:14px}form.inline{display:inline}.row{display:fle
 table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
 .msg{padding:8px 10px;border-radius:8px;background:var(--bg);margin:6px 0}
 </style></head><body><header><nav><a class="logo" href="/">🛡️ SafeTrade</a>
-{% if me %}<a href="/">Browse</a><a href="/sell">Sell</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a>
+{% if me %}<a href="/">Browse</a><a href="/sell">Sell</a><a href="/neighbors">Neighbors</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a>
 {% if me.is_admin %}<a href="/admin">Admin</a>{% endif %}
 <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf() }}"><button class="btn">Log out</button></form>
-{% else %}<a href="/login">Log in</a><a class="btn primary" href="/signup">Sign up</a>{% endif %}
+{% else %}<a href="/neighbors">Neighbors</a><a href="/login">Log in</a><a class="btn primary" href="/signup">Sign up</a>{% endif %}
 </nav></header><main>{% if notice %}<div class="notice {{ 'err' if notice[0]=='err' }}">{{ notice[1] }}</div>{% endif %}{{ body|safe }}</main></body></html>"""
 
 def page(title, tpl, **ctx):
@@ -532,6 +552,117 @@ def message(oid):
     if body and me["id"] in (o["buyer_id"], o["seller_id"]):
         db().execute("INSERT INTO messages(order_id,user_id,body,created) VALUES(?,?,?,?)", (oid, me["id"], body, now()))
     return redirect(url_for("order", oid=oid))
+
+# ---------- Routes: neighbors (help, borrow, free stuff; no money) ----------
+HELP_KINDS = {"need": "Need a hand", "borrow": "Borrow", "free": "Free stuff"}
+HELP_HINT = {"need": "Moving, a ride, fixing something, advice", "borrow": "Tools, a trailer, a ladder, a cooler",
+             "free": "Stuff you'd toss that someone else could use"}
+app.jinja_env.globals["HELP_KINDS"] = HELP_KINDS
+
+NEIGHBORS = """<div class="row" style="align-items:flex-end"><div style="flex:1;min-width:220px"><h2 style="margin:0">Neighbors</h2>
+<p class="meta" style="margin:4px 0 0">Ask for a hand, borrow a tool, give away what you don't need. No money here, just people helping people.</p></div>
+<a class="btn primary" href="/neighbors/new">+ Post</a></div>
+<form class="row" method="get" style="margin:14px 0"><input name="q" placeholder="Search posts" value="{{ q }}" style="flex:2;min-width:160px;margin:0">
+<input type="hidden" name="kind" value="{{ kind }}"><button class="btn">Search</button></form>
+<div class="row" style="margin-bottom:14px"><a class="btn {{ 'primary' if not kind }}" href="/neighbors">All</a>
+{% for k, label in HELP_KINDS.items() %}<a class="btn {{ 'primary' if k==kind }}" href="/neighbors?kind={{ k }}">{{ label }}</a>{% endfor %}</div>
+{% if not rows %}<p class="meta">Nothing here yet. <a href="/neighbors/new">Be the first to post</a>.</p>{% endif %}
+<div style="display:flex;flex-direction:column;gap:10px">{% for p in rows %}<a class="card" href="/neighbors/{{ p.id }}" style="text-decoration:none;color:inherit;display:flex;gap:14px;align-items:center">
+{% if p.image %}<img src="/uploads/{{ p.image }}" alt="" style="width:72px;height:72px;object-fit:cover;border-radius:8px">{% endif %}
+<div style="flex:1;min-width:0"><span class="badge {{ 'pending' if p.kind=='need' }}">{{ HELP_KINDS[p.kind] }}</span>
+{% if p.status=='done' %}<span class="badge refunded">Done</span>{% endif %}
+<div style="font-weight:700;margin-top:4px">{{ p.title }}</div><div class="meta">{{ p.username }} · {{ p.location or 'No location' }} · {{ p.n }} repl{{ 'y' if p.n==1 else 'ies' }}</div></div></a>{% endfor %}</div>"""
+
+@app.route("/neighbors")
+def neighbors():
+    q = request.args.get("q", "").strip(); kind = request.args.get("kind", "")
+    sql = """SELECT p.*, u.username, (SELECT COUNT(*) FROM help_replies r WHERE r.post_id=p.id) n
+        FROM help_posts p JOIN users u ON u.id=p.user_id WHERE p.status!='removed'"""; args = []
+    if kind in HELP_KINDS:
+        sql += " AND p.kind=?"; args.append(kind)
+    else: kind = ""
+    if q:
+        sql += " AND (p.title LIKE ? OR p.body LIKE ? OR p.location LIKE ?)"; args += [f"%{q}%"] * 3
+    rows = db().execute(sql + " ORDER BY p.status='done', p.id DESC", args).fetchall()
+    return page("Neighbors", NEIGHBORS, rows=rows, q=q, kind=kind)
+
+HELP_NEW = """<div class="card" style="max-width:620px;margin:auto"><h2 style="margin-top:0">New post</h2>
+<form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="kind">What kind of post?</label><select id="kind" name="kind">{% for k, label in HELP_KINDS.items() %}
+<option value="{{ k }}" {{ 'selected' if k==f.kind }}>{{ label }} ({{ hints[k] }})</option>{% endfor %}</select>
+<label for="title">Title</label><input id="title" name="title" required maxlength="120" value="{{ f.title }}" placeholder="e.g. Anyone have a ladder I can borrow?">
+<label for="location">Area</label><input id="location" name="location" maxlength="60" placeholder="City, State" value="{{ f.location }}">
+<label for="body">Details</label><textarea id="body" name="body" rows="4" maxlength="2000">{{ f.body }}</textarea>
+<label for="image">Photo (optional)</label><input id="image" type="file" name="image" accept="image/*">
+<button class="btn primary">Post</button></form>
+<p class="meta">Meet in a public place or bring a friend. Never send money to someone here: if it costs money, list it in the Marketplace so it's protected.</p></div>"""
+
+@app.route("/neighbors/new", methods=["GET", "POST"])
+def neighbors_new():
+    me = login_required()
+    f = {k: request.form.get(k, request.args.get(k, "")).strip() for k in ("kind", "title", "location", "body")}
+    if request.method == "POST":
+        if f["kind"] not in HELP_KINDS: flash("Pick what kind of post this is.", "err")
+        elif not f["title"]: flash("Add a title.", "err")
+        else:
+            img = save_image(request.files.get("image"))
+            if img is False: flash("Photo must be JPG, PNG, WEBP or GIF.", "err")
+            else:
+                pid = db().execute("""INSERT INTO help_posts(user_id,kind,title,body,location,image,created)
+                    VALUES(?,?,?,?,?,?,?)""", (me["id"], f["kind"], f["title"][:120], f["body"][:2000],
+                    f["location"][:60], img, now())).lastrowid
+                flash("Posted. Neighbors can reply now.")
+                return redirect(url_for("neighbor_post", pid=pid))
+    return page("New post", HELP_NEW, f=f, hints=HELP_HINT)
+
+HELP_POST = """<p><a href="/neighbors">&larr; Neighbors</a></p><div class="two"><div class="card">
+<span class="badge {{ 'pending' if p.kind=='need' }}">{{ HELP_KINDS[p.kind] }}</span>{% if p.status=='done' %} <span class="badge refunded">Done</span>{% endif %}
+<h1 style="margin:8px 0 4px">{{ p.title }}</h1><p class="meta">Posted by <b>{{ p.username }}</b> · {{ p.location or 'No location' }} · {{ p.created[:10] }}</p>
+{% if p.image %}<img src="/uploads/{{ p.image }}" alt="" style="max-width:100%;border-radius:10px">{% endif %}
+<p style="white-space:pre-wrap">{{ p.body }}</p>
+{% if me and me.id == p.user_id %}<div class="row">{% if p.status=='open' %}
+<form method="post" action="/neighbors/{{ p.id }}/status"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="status" value="done">
+<button class="btn primary">{{ "It's been picked up" if p.kind=='free' else 'Got it, thanks' }}</button></form>{% else %}
+<form method="post" action="/neighbors/{{ p.id }}/status"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="status" value="open">
+<button class="btn">Reopen</button></form>{% endif %}
+<form method="post" action="/neighbors/{{ p.id }}/status"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="status" value="removed">
+<button class="btn danger">Delete</button></form></div>{% endif %}
+<div class="shield">Meet in a public place or bring a friend. Nobody here should ask you for money.</div></div>
+<div class="card"><h3 style="margin-top:0">Replies</h3>{% if not replies %}<p class="meta">No replies yet.</p>{% endif %}
+{% for r in replies %}<div class="msg"><b>{{ r.username }}</b> <span class="meta">{{ r.created[:16].replace('T',' ') }}</span><br>{{ r.body }}</div>{% endfor %}
+{% if me %}<form method="post" action="/neighbors/{{ p.id }}/reply"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="reply">Reply</label><textarea id="reply" name="body" rows="2" required maxlength="1000"
+placeholder="{{ 'I can help' if p.kind=='need' else 'I have one you can use' if p.kind=='borrow' else "I'd like it, when can I pick up?" }}"></textarea>
+<button class="btn">Send reply</button></form>{% else %}<a class="btn primary" href="/login?next=/neighbors/{{ p.id }}">Log in to reply</a>{% endif %}</div></div>"""
+
+def load_help(pid):
+    p = db().execute("SELECT p.*, u.username FROM help_posts p JOIN users u ON u.id=p.user_id WHERE p.id=?", (pid,)).fetchone()
+    if not p or p["status"] == "removed": abort(404)
+    return p
+
+@app.route("/neighbors/<int:pid>")
+def neighbor_post(pid):
+    p = load_help(pid)
+    replies = db().execute("SELECT r.*, u.username FROM help_replies r JOIN users u ON u.id=r.user_id WHERE post_id=? ORDER BY r.id", (pid,)).fetchall()
+    return page(p["title"], HELP_POST, p=p, replies=replies)
+
+@app.route("/neighbors/<int:pid>/reply", methods=["POST"])
+def neighbor_reply(pid):
+    me = login_required(); load_help(pid)
+    body = request.form.get("body", "").strip()[:1000]
+    if body:
+        db().execute("INSERT INTO help_replies(post_id,user_id,body,created) VALUES(?,?,?,?)", (pid, me["id"], body, now()))
+    return redirect(url_for("neighbor_post", pid=pid))
+
+@app.route("/neighbors/<int:pid>/status", methods=["POST"])
+def neighbor_status(pid):
+    me = login_required(); p = load_help(pid); st = request.form.get("status")
+    if p["user_id"] != me["id"] or st not in ("open", "done", "removed"): abort(403)
+    db().execute("UPDATE help_posts SET status=? WHERE id=?", (st, pid))
+    if st == "removed":
+        flash("Post deleted."); return redirect(url_for("neighbors"))
+    flash("Marked as done." if st == "done" else "Reopened.")
+    return redirect(url_for("neighbor_post", pid=pid))
 
 # ---------- Routes: wallet ----------
 WALLET = """<div class="two"><div class="card"><h2 style="margin-top:0">Wallet</h2>
