@@ -21,7 +21,8 @@ total = lambda: conn.execute("SELECT SUM(amount) FROM ledger").fetchone()[0] + A
 # money parsing
 assert A.parse_money("12.5") == 1250 and A.parse_money("$1,200") == 120000 and A.parse_money("0.01") == 1
 assert A.parse_money("0") is None and A.parse_money("-5") is None and A.parse_money("1.234") is None
-assert A.parse_money("abc") is None and A.parse_money("100001") is None
+assert A.parse_money("abc") is None and A.parse_money("10000001") is None
+assert A.parse_money("250000") == 25000000 and A.parse_money("10,000,000") == 1000000000
 assert bal(alice) == 50000 and bal(bob) == 50000
 start = total()
 
@@ -95,7 +96,7 @@ def post(c, url, **data): return c.post(url, data={"csrf": tok(c), **data})
 def login(c, u, pw="demo1234"): return post(c, "/login", username=u, password=pw)
 
 anon = client()
-h = anon.get("/").data; assert b"iPhone 14" in h and b"protected" in h
+h = anon.get("/").data; assert b"iPhone 14" in h and b"Protected:" in h
 assert anon.get("/sell").status_code == 302 and anon.get("/wallet").status_code == 302
 assert anon.post("/login", data={"username": "alice", "password": "demo1234"}).status_code == 400   # CSRF
 assert b"Wrong username" in login(client(), "alice", "nope").data
@@ -141,14 +142,37 @@ b = A.balance(conn, bob); post(buyer, "/wallet/deposit", amount="25.50"); assert
 post(buyer, "/wallet/withdraw", amount="99999")
 assert b"more than your available" in buyer.get("/wallet").data and A.balance(conn, bob) == b + 2550
 
-# image upload: real PNG accepted, fake rejected
+# photos: real images accepted (shrunk, thumbnailed, turned upright), junk skipped, kept across a form error
 import io
-png = b"\x89PNG\r\n\x1a\n" + b"0" * 50
-r = seller.post("/sell", data={"csrf": tok(seller), "title": "Pic", "price": "5", "image": (io.BytesIO(png), "p.png")},
-                content_type="multipart/form-data")
-lid = int(r.headers["Location"].rsplit("/", 1)[1]); img = re.search(rb"/uploads/(\w+\.png)", seller.get(f"/listing/{lid}").data).group(1)
-assert seller.get("/uploads/" + img.decode()).status_code == 200
-r = seller.post("/sell", data={"csrf": tok(seller), "title": "Bad", "price": "5", "image": (io.BytesIO(b"<script>"), "x.png")},
-                content_type="multipart/form-data")
-assert b"Photo must be" in r.data
+from PIL import Image
+def photo(w, h, fmt="JPEG", orientation=None):
+    b = io.BytesIO(); img = Image.new("RGB", (w, h), (200, 30, 30))
+    if orientation:
+        ex = Image.Exif(); ex[0x0112] = orientation; img.save(b, fmt, exif=ex)
+    else: img.save(b, fmt)
+    b.seek(0); return b
+def sell(c, **fields):
+    files = fields.pop("files", [])
+    return c.post("/sell", data={"csrf": tok(c), "price": "5", **fields, "photos": files}, content_type="multipart/form-data")
+r = sell(seller, title="Pic", files=[(photo(4000, 3000), "big.jpg"), (photo(800, 600, "PNG"), "p.png"), (io.BytesIO(b"<script>"), "x.jpg")])
+lid = int(r.headers["Location"].rsplit("/", 1)[1])
+h = seller.get(f"/listing/{lid}").data
+names = re.findall(rb'data-src="/uploads/(\w+\.jpg)"', h); assert len(names) == 2, names
+big = Image.open(io.BytesIO(seller.get("/uploads/" + names[0].decode()).data)); assert big.size == (1600, 1200)
+th = Image.open(io.BytesIO(seller.get("/uploads/" + names[0].decode().replace(".jpg", "_t.jpg")).data)); assert th.size == (640, 480)
+assert b"_t.jpg" in seller.get("/").data and b"_t.jpg" in seller.get("/?view=list").data
+r = sell(seller, title="Sideways", files=[(photo(400, 300, orientation=6), "s.jpg")])   # phone held upright
+h = seller.get(r.headers["Location"]).data; n = re.search(rb'/uploads/(\w+\.jpg)', h).group(1)
+assert Image.open(io.BytesIO(seller.get("/uploads/" + n.decode()).data)).size == (300, 400)
+h = sell(seller, title="Truck", price="250000000", files=[(photo(300, 300), "t.jpg")]).data   # $250M: over the cap
+assert b"10,000,000" in h and b'name="kept"' in h
+kept = re.search(rb'name="kept" value="(\w+\.jpg)"', h).group(1).decode()
+r = seller.post("/sell", data={"csrf": tok(seller), "title": "Truck", "price": "250000", "kept": kept}, content_type="multipart/form-data")
+h = seller.get(r.headers["Location"]).data; assert b"$250,000.00" in h and kept.encode() in h
+h = seller.post("/sell", data={"csrf": tok(seller), "title": "", "kept": "../../etc/passwd"}, content_type="multipart/form-data").data
+assert b"Add a title" in h and b'name="kept"' not in h   # only our own saved photo names are accepted
+lid2 = int(r.headers["Location"].rsplit("/", 1)[1])
+r = seller.post(f"/listing/{lid2}/photos", data={"csrf": tok(seller), "photos": [(photo(500, 500), "a.jpg")]}, content_type="multipart/form-data")
+assert len(re.findall(rb'data-src="/uploads/', seller.get(f"/listing/{lid2}").data)) == 2
+assert buyer.post(f"/listing/{lid2}/photos", data={"csrf": tok(buyer), "photos": [(photo(5, 5), "a.jpg")]}, content_type="multipart/form-data").status_code == 404
 print("ALL ESCROW TESTS PASSED")

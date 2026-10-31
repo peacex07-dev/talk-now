@@ -9,6 +9,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from flask import Flask, g, request, session, redirect, url_for, render_template_string, abort, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
+from PIL import Image, ImageOps
+try:
+    from pillow_heif import register_heif_opener   # iPhone HEIC photos
+    register_heif_opener()
+except ImportError:
+    pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("SAFETRADE_DB", os.path.join(HERE, "safetrade.db"))
@@ -16,8 +22,8 @@ UPLOADS = os.environ.get("SAFETRADE_UPLOADS", os.path.join(HERE, "uploads"))
 CATEGORIES = ["Electronics", "Furniture", "Vehicles", "Clothing", "Home & Garden", "Sports", "Toys", "Other"]
 ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clothing": "👕", "Home & Garden": "🪴",
         "Sports": "🚲", "Toys": "🧸", "Other": "📦"}
-IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
-MAX_PRICE_CENTS = 100_000_00   # $100,000 cap per listing / deposit
+MAX_PRICE_CENTS = 10_000_000_00   # $10,000,000 cap per listing / deposit
+MAX_PHOTOS = 8                    # photos per listing
 FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
 RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "1"))   # no-questions-asked return window after both approve
 
@@ -27,7 +33,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(16)
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                   SESSION_COOKIE_SECURE=os.environ.get("SAFETRADE_SECURE_COOKIES") == "1")
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024   # 8 full-size phone photos; each is shrunk on save
 
 def now(): return datetime.now().isoformat(timespec="seconds")
 def days(n): return f"{n} day" if n == 1 else f"{n} days"
@@ -76,6 +82,8 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, order_id INTEGER, user
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, order_id INTEGER, user_id INTEGER, body TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS help_posts(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL,
   title TEXT NOT NULL, body TEXT, location TEXT, image TEXT, status TEXT DEFAULT 'open', created TEXT);
+CREATE TABLE IF NOT EXISTS listing_photos(id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id),
+  name TEXT NOT NULL, created TEXT);
 CREATE TABLE IF NOT EXISTS help_replies(id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES help_posts(id),
   user_id INTEGER NOT NULL REFERENCES users(id), body TEXT, created TEXT);
 """
@@ -326,7 +334,14 @@ nav{max-width:1100px;margin:auto;display:flex;gap:14px;align-items:center;paddin
 nav .logo{font-weight:800;font-size:20px;text-decoration:none;color:var(--brand);margin-right:auto}nav a{text-decoration:none;font-weight:600}
 main{max-width:1100px;margin:auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.tile{text-decoration:none;color:inherit;padding:0;overflow:hidden;display:block}
-.thumb{aspect-ratio:1;background:var(--soft);display:flex;align-items:center;justify-content:center;font-size:64px;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover}
+.thumb{aspect-ratio:1;max-width:100%;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.gallery-main{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%;background:#111;border-radius:12px;overflow:hidden;color:#bbb}
+.gallery-main img{width:100%;height:100%;object-fit:contain;display:block}
+.strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0}.strip button{padding:0;border:2px solid transparent;border-radius:8px;overflow:hidden;background:none;cursor:pointer;flex:none}
+.strip button.on{border-color:var(--brand)}.strip img{width:64px;height:64px;object-fit:cover;display:block}
+.rows{display:flex;flex-direction:column;gap:10px}.rowitem{display:flex;gap:12px;align-items:center;text-decoration:none;color:inherit;padding:8px}
+.rowitem .thumb{width:96px;flex:none;border-radius:8px}.rowitem .info{min-width:0}
+.views{display:flex;gap:6px;margin-left:auto}.views a{text-decoration:none}
 .tile .info{padding:10px 12px}.price{font-weight:800;font-size:18px}.meta{color:var(--muted);font-size:14px}
 .btn{display:inline-block;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:9px 14px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none}
 .btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}.btn.danger{color:var(--bad)}
@@ -411,26 +426,44 @@ BROWSE = """<form class="row" method="get" style="margin-bottom:14px">
 <input name="q" placeholder="Search Marketplace" value="{{ q }}" style="flex:2;min-width:180px;margin:0">
 <select name="cat" style="flex:1;min-width:140px;margin:0"><option value="">All categories</option>
 {% for c in cats %}<option {{ 'selected' if c==cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></form>
-<div class="shield">🛡️ <b>Every purchase is protected.</b> Your payment sits in escrow. The seller only gets paid after
-<b>both</b> of you approve: the seller confirms handover and you confirm you got what was described. Changed your mind? Return it within {{ RETURN_PERIOD }}, no questions asked.</div>
+<div class="shield" style="margin:0 0 12px;padding:8px 12px;font-size:14px">🛡️ <b>Protected:</b> the seller is paid only after you both approve. {{ RETURN_PERIOD|capitalize }} returns, no questions asked.</div>
+<div class="row" style="margin-bottom:10px"><span class="meta">{{ rows|length }} listing{{ '' if rows|length == 1 else 's' }}</span>
+<div class="views"><a class="btn {{ 'primary' if view=='grid' }}" href="{{ view_url('grid') }}">Photos</a><a class="btn {{ 'primary' if view=='list' }}" href="{{ view_url('list') }}">List</a></div></div>
 {% if not rows %}<p class="meta">No listings match.</p>{% endif %}
-<div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
-{% if l.image %}<img src="/uploads/{{ l.image }}" alt="">{% else %}{{ ICON.get(l.category, '📦') }}{% endif %}</div>
-<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}</div></div></a>{% endfor %}</div>"""
+{% if view == 'list' %}<div class="rows">{% for l in rows %}<a class="card rowitem" href="/listing/{{ l.id }}"><div class="thumb">
+{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
+<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}{% if l.n_photos > 1 %} · {{ l.n_photos }} photos{% endif %}</div></div></a>{% endfor %}</div>
+{% else %}<div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
+{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
+<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}</div></div></a>{% endfor %}</div>{% endif %}"""
 
 @app.route("/")
 def browse():
     q = request.args.get("q", "").strip(); cat = request.args.get("cat", "")
-    sql = "SELECT * FROM listings WHERE status='active'"; args = []
+    view = "list" if request.args.get("view") == "list" else "grid"
+    sql = """SELECT l.*, (SELECT COUNT(*) FROM listing_photos p WHERE p.listing_id=l.id) n_photos
+        FROM listings l WHERE status='active'"""; args = []
     if q:
         sql += " AND (title LIKE ? OR body LIKE ? OR location LIKE ?)"; args += [f"%{q}%"] * 3
     if cat in CATEGORIES:
         sql += " AND category=?"; args.append(cat)
     rows = db().execute(sql + " ORDER BY id DESC", args).fetchall()
-    return page("Marketplace", BROWSE, rows=rows, q=q, cat=cat, cats=CATEGORIES)
+    def view_url(v): return url_for("browse", q=q or None, cat=cat or None, view=v if v == "list" else None)
+    return page("Marketplace", BROWSE, rows=rows, q=q, cat=cat, cats=CATEGORIES, view=view, view_url=view_url)
 
-LISTING = """<div class="two"><div class="card" style="padding:0;overflow:hidden"><div class="thumb" style="aspect-ratio:4/3;font-size:120px">
-{% if l.image %}<img src="/uploads/{{ l.image }}" alt="">{% else %}{{ ICON.get(l.category, '📦') }}{% endif %}</div></div>
+LISTING = """<div class="two"><div>{% if photos %}<a id="mainlink" href="/uploads/{{ photos[0] }}" target="_blank" class="gallery-main">
+<img id="mainphoto" src="/uploads/{{ photos[0] }}" alt="{{ l.title }}"></a>
+{% if photos|length > 1 %}<div class="strip">{% for p in photos %}<button type="button" class="{{ 'on' if loop.first }}" data-src="/uploads/{{ p }}" aria-label="Photo {{ loop.index }}">
+<img src="/uploads/{{ p|thumb }}" alt=""></button>{% endfor %}</div>
+<script>document.querySelectorAll('.strip button').forEach(function(b){b.onclick=function(){
+document.getElementById('mainphoto').src=b.dataset.src;document.getElementById('mainlink').href=b.dataset.src;
+document.querySelectorAll('.strip button').forEach(function(x){x.classList.toggle('on',x===b)})}})</script>{% endif %}
+<p class="meta" style="margin:4px 0">Tap the photo to see it full size.</p>
+{% else %}<div class="gallery-main">No photos yet</div>{% endif %}
+{% if me and me.id == l.seller_id and l.status == 'active' and photos|length < max_photos %}
+<form method="post" action="/listing/{{ l.id }}/photos" enctype="multipart/form-data" class="card" style="margin-top:10px">
+<input type="hidden" name="csrf" value="{{ csrf() }}"><label for="addphotos">Add photos (up to {{ max_photos - photos|length }} more)</label>
+<input id="addphotos" type="file" name="photos" accept="image/*" multiple required><button class="btn primary">Upload photos</button></form>{% endif %}</div>
 <div class="card"><h1 style="margin:0 0 4px">{{ l.title }}</h1><div class="price" style="font-size:24px">{{ l.price|money }}</div>
 <p class="meta">{{ l.category }} · {{ l.location }} · Listed {{ l.created[:10] }} by <b>{{ seller }}</b>
 {% if l.status != 'active' %} · <span class="badge {{ l.status }}">{{ l.status }}</span>{% endif %}</p>
@@ -455,7 +488,21 @@ def listing(lid):
     if not l or l["status"] == "removed": abort(404)
     seller = db().execute("SELECT username FROM users WHERE id=?", (l["seller_id"],)).fetchone()[0]
     me = current_user()
-    return page(l["title"], LISTING, l=l, seller=seller, bal=balance(db(), me["id"]) if me else 0)
+    return page(l["title"], LISTING, l=l, seller=seller, bal=balance(db(), me["id"]) if me else 0,
+                photos=listing_photos(lid), max_photos=MAX_PHOTOS)
+
+@app.route("/listing/<int:lid>/photos", methods=["POST"])
+def add_photos(lid):
+    me = login_required()
+    l = db().execute("SELECT * FROM listings WHERE id=? AND seller_id=? AND status='active'", (lid, me["id"])).fetchone()
+    if not l: abort(404)
+    room = MAX_PHOTOS - len(listing_photos(lid))
+    names, bad = save_images(request.files.getlist("photos"), room)
+    attach_photos(lid, names)
+    msg = f"Added {len(names)} photo{'s' if len(names) != 1 else ''}." if names else "No photos were added."
+    if bad: msg += f" {bad} file{'s' if bad != 1 else ''} couldn't be read as a photo."
+    flash(msg, "ok" if names else "err")
+    return redirect(url_for("listing", lid=lid))
 
 @app.route("/listing/<int:lid>/buy", methods=["POST"])
 def buy_route(lid):
@@ -482,7 +529,10 @@ SELL = """<div class="card" style="max-width:620px;margin:auto"><h2>Sell an item
 <label>Category</label><select name="category">{% for c in cats %}<option {{ 'selected' if c==f.category }}>{{ c }}</option>{% endfor %}</select>
 <label>Location</label><input name="location" maxlength="60" placeholder="City, State" value="{{ f.location }}">
 <label>Description</label><textarea name="body" rows="5" maxlength="3000">{{ f.body }}</textarea>
-<label>Photo (optional, max 5 MB)</label><input type="file" name="image" accept="image/*">
+<label for="photos">Photos (up to {{ max_photos }})</label>
+{% if kept %}<div class="strip">{% for n in kept %}<input type="hidden" name="kept" value="{{ n }}"><img src="/uploads/{{ n|thumb }}" alt="">{% endfor %}</div>
+<p class="meta" style="margin:0 0 6px">These photos are saved. Add more below if you like.</p>{% endif %}
+<input id="photos" type="file" name="photos" accept="image/*" multiple>
 <button class="btn primary">Publish listing</button></form>
 <p class="meta">Buyers pay into escrow. You're paid when you confirm the handover and the buyer confirms receipt.</p></div>"""
 
@@ -490,36 +540,73 @@ SELL = """<div class="card" style="max-width:620px;margin:auto"><h2>Sell an item
 def sell():
     me = login_required()
     f = {k: request.form.get(k, "").strip() for k in ("title", "price", "category", "location", "body")}
+    kept = []
     if request.method == "POST":
+        # Photos are saved before the other fields are checked, so a typo never makes the seller pick them again.
+        kept = [n for n in request.form.getlist("kept") if PHOTO_NAME.fullmatch(n) and os.path.exists(os.path.join(UPLOADS, n))]
+        new, bad = save_images(request.files.getlist("photos"), MAX_PHOTOS - len(kept))
+        kept = (kept + new)[:MAX_PHOTOS]
         price = parse_money(f["price"])
         if not f["title"]: flash("Add a title.", "err")
-        elif price is None: flash("Enter a price between $0.01 and $100,000.", "err")
+        elif price is None: flash("Enter a price between $0.01 and $10,000,000.", "err")
         else:
-            img = save_image(request.files.get("image"))
-            if img is False: flash("Photo must be JPG, PNG, WEBP or GIF.", "err")
-            else:
-                lid = db().execute("""INSERT INTO listings(seller_id,title,body,price,category,location,image,created)
-                    VALUES(?,?,?,?,?,?,?,?)""", (me["id"], f["title"][:100], f["body"][:3000], price,
-                    f["category"] if f["category"] in CATEGORIES else "Other", f["location"][:60], img, now())).lastrowid
-                flash("Your listing is live.")
-                return redirect(url_for("listing", lid=lid))
-    return page("Sell", SELL, f=f, cats=CATEGORIES)
+            lid = db().execute("""INSERT INTO listings(seller_id,title,body,price,category,location,created)
+                VALUES(?,?,?,?,?,?,?)""", (me["id"], f["title"][:100], f["body"][:3000], price,
+                f["category"] if f["category"] in CATEGORIES else "Other", f["location"][:60], now())).lastrowid
+            attach_photos(lid, kept)
+            msg = "Your listing is live."
+            if bad: msg += f" {bad} file{'s' if bad != 1 else ''} couldn't be read as a photo and {'were' if bad != 1 else 'was'} skipped."
+            flash(msg)
+            return redirect(url_for("listing", lid=lid))
+    return page("Sell", SELL, f=f, cats=CATEGORIES, kept=kept, max_photos=MAX_PHOTOS)
+
+PHOTO_NAME = re.compile(r"[0-9a-f]{24}\.jpg")
+
+def thumb_name(name):
+    """640px version for tiles and lists; older uploads without one fall back to the original."""
+    return name[:-4] + "_t.jpg" if PHOTO_NAME.fullmatch(name or "") else name
+app.jinja_env.filters["thumb"] = thumb_name
 
 def save_image(file):
-    """Returns stored filename, None if no file, False if invalid."""
+    """Store an upload as a 1600px JPEG (upright, sharp, small enough for phones) plus a 640px thumbnail.
+    Returns the file name, None if no file was chosen, False if it isn't a readable photo."""
     if not file or not file.filename: return None
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    head = file.stream.read(12); file.stream.seek(0)
-    magic = head.startswith(b"\xff\xd8") or head.startswith(b"\x89PNG") or head[:4] == b"GIF8" or head[8:12] == b"WEBP"
-    if ext not in IMG_EXT or not magic: return False
+    try:
+        img = Image.open(file.stream)
+        img.draft("RGB", (3200, 3200))   # JPEGs decode at reduced size, so 50+ MP phone photos stay cheap
+        img = ImageOps.exif_transpose(img).convert("RGB")
+    except Exception:
+        return False
     os.makedirs(UPLOADS, exist_ok=True)
-    name = secrets.token_hex(12) + "." + ext
-    file.save(os.path.join(UPLOADS, name))
+    name = secrets.token_hex(12) + ".jpg"
+    big = img.copy(); big.thumbnail((1600, 1600), Image.LANCZOS)
+    big.save(os.path.join(UPLOADS, name), "JPEG", quality=85, optimize=True)
+    img.thumbnail((640, 640), Image.LANCZOS)
+    img.save(os.path.join(UPLOADS, thumb_name(name)), "JPEG", quality=82, optimize=True)
     return name
+
+def save_images(files, room):
+    """Save up to `room` photos. Returns (names, count of files that weren't readable photos)."""
+    names, bad = [], 0
+    for f in files:
+        if len(names) >= room: break
+        n = save_image(f)
+        if n: names.append(n)
+        elif n is False: bad += 1
+    return names, bad
+
+def listing_photos(lid):
+    return [r[0] for r in db().execute("SELECT name FROM listing_photos WHERE listing_id=? ORDER BY id", (lid,))]
+
+def attach_photos(lid, names):
+    for n in names:
+        db().execute("INSERT INTO listing_photos(listing_id,name,created) VALUES(?,?,?)", (lid, n, now()))
+    if names:   # the first photo is the cover shown in browse tiles
+        db().execute("UPDATE listings SET image=COALESCE(image, ?) WHERE id=?", (names[0], lid))
 
 @app.route("/uploads/<path:name>")
 def uploads(name):
-    return send_from_directory(UPLOADS, name)
+    return send_from_directory(UPLOADS, name, max_age=31536000)   # names are random and never reused
 
 # ---------- Routes: orders ----------
 ORDERS = """<h2>Buying</h2>{{ table(buying, 'Seller') }}<h2>Selling</h2>{{ table(selling, 'Buyer') }}
@@ -659,7 +746,7 @@ NEIGHBORS = """<div class="row" style="align-items:flex-end"><div style="flex:1;
 {% for k, label in HELP_KINDS.items() %}<a class="btn {{ 'primary' if k==kind }}" href="/neighbors?kind={{ k }}">{{ label }}</a>{% endfor %}</div>
 {% if not rows %}<p class="meta">Nothing here yet. <a href="/neighbors/new">Be the first to post</a>.</p>{% endif %}
 <div style="display:flex;flex-direction:column;gap:10px">{% for p in rows %}<a class="card" href="/neighbors/{{ p.id }}" style="text-decoration:none;color:inherit;display:flex;gap:14px;align-items:center">
-{% if p.image %}<img src="/uploads/{{ p.image }}" alt="" style="width:72px;height:72px;object-fit:cover;border-radius:8px">{% endif %}
+{% if p.image %}<img src="/uploads/{{ p.image|thumb }}" alt="" style="width:72px;height:72px;object-fit:cover;border-radius:8px">{% endif %}
 <div style="flex:1;min-width:0"><span class="badge {{ 'pending' if p.kind=='need' }}">{{ HELP_KINDS[p.kind] }}</span>
 {% if p.status=='done' %}<span class="badge refunded">Done</span>{% endif %}
 <div style="font-weight:700;margin-top:4px">{{ p.title }}</div><div class="meta">{{ p.username }} · {{ p.location or 'No location' }} · {{ p.n }} repl{{ 'y' if p.n==1 else 'ies' }}</div></div></a>{% endfor %}</div>"""
@@ -697,7 +784,7 @@ def neighbors_new():
         elif not f["title"]: flash("Add a title.", "err")
         else:
             img = save_image(request.files.get("image"))
-            if img is False: flash("Photo must be JPG, PNG, WEBP or GIF.", "err")
+            if img is False: flash("That file isn't a photo we can read. Try a JPG or PNG.", "err")
             else:
                 pid = db().execute("""INSERT INTO help_posts(user_id,kind,title,body,location,image,created)
                     VALUES(?,?,?,?,?,?,?)""", (me["id"], f["kind"], f["title"][:120], f["body"][:2000],
@@ -778,7 +865,7 @@ def wallet():
 @app.route("/wallet/<op>", methods=["POST"])
 def wallet_op(op):
     me = login_required(); cents = parse_money(request.form.get("amount"))
-    if cents is None: flash("Enter an amount between $0.01 and $100,000.", "err")
+    if cents is None: flash("Enter an amount between $0.01 and $10,000,000.", "err")
     else:
         try:
             if op == "deposit": deposit(db(), me["id"], cents); flash(f"Added {money(cents)}.")

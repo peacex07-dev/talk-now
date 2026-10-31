@@ -77,7 +77,7 @@ def tok(c):
     with c.session_transaction() as s: return s["csrf"]
 def post(c, url, **data): return c.post(url, data={"csrf": tok(c), **data})
 seller, buyer = client("alice"), client("bob")
-assert b"within 1 day," in buyer.get("/").data and b"1 day</b>" in buyer.get("/listing/1").data
+assert b"1 day returns" in buyer.get("/").data and b"1 day</b>" in buyer.get("/listing/1").data
 lid = int(post(seller, "/sell", title="Drill", price="80").headers["Location"].rsplit("/", 1)[1])
 oid = int(post(buyer, f"/listing/{lid}/buy").headers["Location"].rsplit("/", 1)[1])
 post(seller, f"/order/{oid}/approve"); post(buyer, f"/order/{oid}/approve")

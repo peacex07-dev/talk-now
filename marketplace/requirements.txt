@@ -1,2 +1,4 @@
 flask
 gunicorn
+pillow
+pillow-heif

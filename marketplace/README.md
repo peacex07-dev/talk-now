@@ -21,6 +21,12 @@ enter an admin password when asked, Apply. About $7.25/month (Starter instance +
 The public site starts empty: no alice/bob demo accounts (`SAFETRADE_DEMO_DATA=0`), only `admin` with your password.
 Every page shows a "test version, pretend money" banner until real payments (Stripe Connect) are wired in.
 
+## Photos
+Up to 8 photos per listing (pick several at once on a phone). Each upload is turned upright, saved as a 1600px JPEG
+plus a 640px thumbnail for browse tiles, so big phone photos load fast. HEIC (iPhone) works via pillow-heif.
+Photos are kept if the rest of the sell form has an error, and sellers can add photos to a live listing.
+Browse has a Photos (grid) and List view. Price cap is $10,000,000.
+
 ## How a sale works
 1. Buyer taps **Buy with Safe Transfer**. The price leaves the buyer's wallet and is held in escrow. The listing is hidden.
 2. Buyer and seller arrange pickup/shipping in the order's message thread.
