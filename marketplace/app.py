@@ -24,6 +24,12 @@ ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clot
         "Sports": "🚲", "Toys": "🧸", "Other": "📦"}
 MAX_PRICE_CENTS = 10_000_000_00   # $10,000,000 cap per listing / deposit
 MAX_PHOTOS = 8                    # photos per listing
+CONDITIONS = ["New", "Used - Like new", "Used - Good", "Used - Fair"]
+SORTS = {"new": ("Newest first", "l.id DESC"), "price_asc": ("Price: low to high", "l.price ASC, l.id DESC"),
+         "price_desc": ("Price: high to low", "l.price DESC, l.id DESC")}
+# Messages that try to move payment or contact off the site are the classic marketplace scam; flag them to the reader.
+OFF_SITE = re.compile(r"\b(zelle|cash ?app|venmo|paypal|wire|western union|gift ?cards?|bitcoin|crypto|whats ?app|telegram)\b"
+                      r"|\b\d{3}[\s.-]?\d{3}[\s.-]?\d{4}\b|[\w.+-]+@[\w-]+\.[\w.]+", re.I)
 FEE_PCT = float(os.environ.get("SAFETRADE_FEE_PCT", "5"))   # platform fee, taken from the seller's payout on completed sales only
 RETURN_DAYS = int(os.environ.get("SAFETRADE_RETURN_DAYS", "1"))   # no-questions-asked return window after both approve
 
@@ -38,6 +44,14 @@ app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024   # 8 full-size phone photo
 def now(): return datetime.now().isoformat(timespec="seconds")
 def days(n): return f"{n} day" if n == 1 else f"{n} days"
 def when(ts): return ts[:16].replace("T", " ") if ts else ""
+def ago(ts):
+    """'3 hours ago' style, the way people read listing ages."""
+    if not ts: return ""
+    secs = max(0, (datetime.now() - datetime.fromisoformat(ts)).total_seconds())
+    for unit, size, limit in (("minute", 60, 60), ("hour", 3600, 24), ("day", 86400, 7), ("week", 604800, 5)):
+        n = int(secs // size)
+        if n < limit: return "just now" if unit == "minute" and n == 0 else f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return datetime.fromisoformat(ts).strftime("%b %-d, %Y")
 
 # ---------- DB ----------
 def connect():
@@ -82,6 +96,14 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, order_id INTEGER, user
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, order_id INTEGER, user_id INTEGER, body TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS help_posts(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL,
   title TEXT NOT NULL, body TEXT, location TEXT, image TEXT, status TEXT DEFAULT 'open', created TEXT);
+CREATE TABLE IF NOT EXISTS conversations(id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id),
+  buyer_id INTEGER NOT NULL REFERENCES users(id), seller_id INTEGER NOT NULL REFERENCES users(id), created TEXT,
+  last_at TEXT, last_from INTEGER, last_body TEXT, buyer_seen TEXT, seller_seen TEXT, UNIQUE(listing_id, buyer_id));
+CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, conv_id INTEGER NOT NULL REFERENCES conversations(id),
+  user_id INTEGER NOT NULL REFERENCES users(id), body TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS saved(user_id INTEGER NOT NULL, listing_id INTEGER NOT NULL, created TEXT, PRIMARY KEY(user_id, listing_id));
+CREATE TABLE IF NOT EXISTS ratings(order_id INTEGER NOT NULL, rater_id INTEGER NOT NULL, ratee_id INTEGER NOT NULL,
+  stars INTEGER NOT NULL, comment TEXT, created TEXT, PRIMARY KEY(order_id, rater_id));
 CREATE TABLE IF NOT EXISTS listing_photos(id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id),
   name TEXT NOT NULL, created TEXT);
 CREATE TABLE IF NOT EXISTS help_replies(id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL REFERENCES help_posts(id),
@@ -95,6 +117,9 @@ def init_db(conn):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)")}
         for c in ("return_until", "return_reason"):   # databases created before returns existed
             if c not in cols: conn.execute(f"ALTER TABLE orders ADD COLUMN {c} TEXT")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(listings)")}
+        for c, t in (("condition", "TEXT"), ("was_price", "INTEGER")):   # before conditions and price drops
+            if c not in cols: conn.execute(f"ALTER TABLE listings ADD COLUMN {c} {t}")
         if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
             seed_market(conn)
         if not conn.execute("SELECT COUNT(*) FROM help_posts").fetchone()[0]:
@@ -122,13 +147,13 @@ def seed_market(conn):
                                  (name, generate_password_hash(pw), adm, now())).lastrowid
     for name in ("alice", "bob"):
         conn.execute("INSERT INTO ledger(user_id,kind,amount,created) VALUES(?,'deposit',50000,?)", (ids[name], now()))
-    for who, t, b, p, c, loc in [
-        ("alice", "iPhone 14, 128GB", "Great condition, always in a case. Charger included.", 42000, "Electronics", "Lafayette, LA"),
-        ("alice", "Mid-century armchair", "Teal fabric, solid wood legs. Pickup only.", 15000, "Furniture", "Lafayette, LA"),
-        ("bob", "Trek road bike", "54cm frame, new tires last spring.", 38000, "Sports", "Baton Rouge, LA"),
-        ("bob", "LEGO Millennium Falcon", "Complete with box and manual.", 9500, "Toys", "Baton Rouge, LA")]:
-        conn.execute("INSERT INTO listings(seller_id,title,body,price,category,location,created) VALUES(?,?,?,?,?,?,?)",
-                     (ids[who], t, b, p, c, loc, now()))
+    for who, t, b, p, c, cond, loc in [
+        ("alice", "iPhone 14, 128GB", "Great condition, always in a case. Charger included.", 42000, "Electronics", "Used - Like new", "Lafayette, LA"),
+        ("alice", "Mid-century armchair", "Teal fabric, solid wood legs. Pickup only.", 15000, "Furniture", "Used - Good", "Lafayette, LA"),
+        ("bob", "Trek road bike", "54cm frame, new tires last spring.", 38000, "Sports", "Used - Good", "Baton Rouge, LA"),
+        ("bob", "LEGO Millennium Falcon", "Complete with box and manual.", 9500, "Toys", "New", "Baton Rouge, LA")]:
+        conn.execute("INSERT INTO listings(seller_id,title,body,price,category,condition,location,created) VALUES(?,?,?,?,?,?,?,?)",
+                     (ids[who], t, b, p, c, cond, loc, now()))
 
 # ---------- Money ----------
 def parse_money(s):
@@ -330,8 +355,14 @@ BASE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport"
 @media (prefers-color-scheme:dark){:root{--bg:#18191a;--card:#242526;--ink:#e4e6eb;--muted:#b0b3b8;--line:#3a3b3c;--soft:#173528}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 a{color:var(--brand)}header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-nav{max-width:1100px;margin:auto;display:flex;gap:14px;align-items:center;padding:10px 16px;flex-wrap:wrap}
+nav{max-width:1100px;margin:auto;display:flex;gap:8px 16px;align-items:center;padding:8px 16px;flex-wrap:wrap}
 nav .logo{font-weight:800;font-size:20px;text-decoration:none;color:var(--brand);margin-right:auto}nav a{text-decoration:none;font-weight:600}
+nav .links{display:flex;gap:16px;align-items:center;overflow-x:auto;white-space:nowrap;max-width:100%;scrollbar-width:none}
+.dot{display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--bad);color:#fff;font-size:12px;text-align:center}
+.bubbles{display:flex;flex-direction:column;gap:6px}.bubble{max-width:80%;padding:8px 12px;border-radius:14px;background:var(--bg);white-space:pre-wrap}
+.bubble.mine{align-self:flex-end;background:var(--brand);color:var(--brand-ink)}.warn{background:#fff3e0;color:#7a3405;border-radius:8px;padding:8px 10px;font-size:14px}
+.stars{color:#b7791f;letter-spacing:1px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+s.was{color:var(--muted);font-weight:400;font-size:14px;margin-left:6px}
 main{max-width:1100px;margin:auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.tile{text-decoration:none;color:inherit;padding:0;overflow:hidden;display:block}
 .thumb{aspect-ratio:1;max-width:100%;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}
@@ -359,10 +390,12 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 .msg{padding:8px 10px;border-radius:8px;background:var(--bg);margin:6px 0}
 .testmode{background:#fff3e0;color:#7a3405;text-align:center;font-size:14px;padding:8px 16px}
 </style></head><body><header><nav><a class="logo" href="/">🛡️ SafeTrade</a>
-{% if me %}<a href="/">Browse</a><a href="/sell">Sell</a><a href="/neighbors">Neighbors</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a>
+{% if me %}<a class="btn primary" href="/sell">+ Sell</a>
+<div class="links"><a href="/">Browse</a><a href="/inbox">Inbox{% if unread %} <span class="dot">{{ unread }}</span>{% endif %}</a><a href="/saved">Saved</a>
+<a href="/neighbors">Neighbors</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a><a href="/u/{{ me.username }}">Profile</a>
 {% if me.is_admin %}<a href="/admin">Admin</a>{% endif %}
-<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf() }}"><button class="btn">Log out</button></form>
-{% else %}<a href="/neighbors">Neighbors</a><a href="/login">Log in</a><a class="btn primary" href="/signup">Sign up</a>{% endif %}
+<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf() }}"><button class="btn">Log out</button></form></div>
+{% else %}<div class="links"><a href="/neighbors">Neighbors</a><a href="/login">Log in</a><a class="btn primary" href="/signup">Sign up</a></div>{% endif %}
 </nav></header><div class="testmode">Test version: wallet money is pretend. Don't pay anyone real money through this site yet.</div>
 <main>{% if notice %}<div class="notice {{ 'err' if notice[0]=='err' }}">{{ notice[1] }}</div>{% endif %}{{ body|safe }}</main></body></html>"""
 
@@ -370,11 +403,13 @@ def page(title, tpl, **ctx):
     me = current_user()
     body = render_template_string(tpl, me=me, **ctx)
     return render_template_string(BASE, title=title, body=body, me=me, bal=balance(db(), me["id"]) if me else 0,
-                                  notice=session.pop("notice", None))
+                                  unread=unread_count(me["id"]) if me else 0, notice=session.pop("notice", None))
 
 STATUS_LABEL = {"funded": "In escrow", "return_window": "Return window", "return_requested": "Return requested",
                 "disputed": "Disputed", "released": "Completed", "refunded": "Refunded"}
 app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL, RETURN_PERIOD=days(RETURN_DAYS), FEE_PCT=FEE_PCT)
+app.jinja_env.filters["ago"] = ago
+app.jinja_env.filters["stars"] = lambda n: "★" * int(round(n or 0)) + "☆" * (5 - int(round(n or 0)))
 
 # ---------- Routes: auth ----------
 AUTH = """<div class="card" style="max-width:420px;margin:30px auto"><h2>{{ heading }}</h2>
@@ -422,34 +457,56 @@ def logout():
     session.clear(); return redirect(url_for("browse"))
 
 # ---------- Routes: listings ----------
-BROWSE = """<form class="row" method="get" style="margin-bottom:14px">
-<input name="q" placeholder="Search Marketplace" value="{{ q }}" style="flex:2;min-width:180px;margin:0">
-<select name="cat" style="flex:1;min-width:140px;margin:0"><option value="">All categories</option>
-{% for c in cats %}<option {{ 'selected' if c==cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></form>
+BROWSE = """<form method="get" style="margin-bottom:12px"><div class="row">
+<input name="q" placeholder="Search Marketplace" value="{{ fl.q }}" style="flex:2;min-width:180px;margin:0" aria-label="Search">
+<select name="cat" style="flex:1;min-width:140px;margin:0" aria-label="Category"><option value="">All categories</option>
+{% for c in cats %}<option {{ 'selected' if c==fl.cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></div>
+<details {{ 'open' if filtering }} style="margin-top:8px"><summary class="btn">Filters{% if filtering %} (on){% endif %}</summary>
+<div class="card" style="margin-top:8px"><div class="row">
+<div style="flex:1;min-width:120px"><label for="min">Min price</label><input id="min" name="min" inputmode="decimal" placeholder="$0" value="{{ fl.min }}"></div>
+<div style="flex:1;min-width:120px"><label for="max">Max price</label><input id="max" name="max" inputmode="decimal" placeholder="Any" value="{{ fl.max }}"></div></div>
+<div class="row"><div style="flex:1;min-width:160px"><label for="cond">Condition</label><select id="cond" name="cond"><option value="">Any</option>
+{% for c in conditions %}<option {{ 'selected' if c==fl.cond }}>{{ c }}</option>{% endfor %}</select></div>
+<div style="flex:1;min-width:160px"><label for="near">Location</label><input id="near" name="near" placeholder="City or state" value="{{ fl.near }}"></div></div>
+<label for="sort">Sort by</label><select id="sort" name="sort">{% for k, v in sorts.items() %}<option value="{{ k }}" {{ 'selected' if k==fl.sort }}>{{ v[0] }}</option>{% endfor %}</select>
+<input type="hidden" name="view" value="{{ view if view=='list' }}"><div class="row"><button class="btn primary">Apply</button><a class="btn" href="/">Clear all</a></div></div></details></form>
 <div class="shield" style="margin:0 0 12px;padding:8px 12px;font-size:14px">🛡️ <b>Protected:</b> the seller is paid only after you both approve. {{ RETURN_PERIOD|capitalize }} returns, no questions asked.</div>
 <div class="row" style="margin-bottom:10px"><span class="meta">{{ rows|length }} listing{{ '' if rows|length == 1 else 's' }}</span>
 <div class="views"><a class="btn {{ 'primary' if view=='grid' }}" href="{{ view_url('grid') }}">Photos</a><a class="btn {{ 'primary' if view=='list' }}" href="{{ view_url('list') }}">List</a></div></div>
 {% if not rows %}<p class="meta">No listings match.</p>{% endif %}
 {% if view == 'list' %}<div class="rows">{% for l in rows %}<a class="card rowitem" href="/listing/{{ l.id }}"><div class="thumb">
 {% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
-<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}{% if l.n_photos > 1 %} · {{ l.n_photos }} photos{% endif %}</div></div></a>{% endfor %}</div>
+<div class="info"><div class="price">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div><div>{{ l.title }}</div>
+<div class="meta">{{ l.location }} · {{ l.created|ago }}{% if l.n_photos > 1 %} · {{ l.n_photos }} photos{% endif %}</div></div></a>{% endfor %}</div>
 {% else %}<div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
 {% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
-<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}</div></div></a>{% endfor %}</div>{% endif %}"""
+<div class="info"><div class="price">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div><div>{{ l.title }}</div>
+<div class="meta">{{ l.location }}</div></div></a>{% endfor %}</div>{% endif %}"""
 
 @app.route("/")
 def browse():
-    q = request.args.get("q", "").strip(); cat = request.args.get("cat", "")
+    fl = {k: request.args.get(k, "").strip() for k in ("q", "cat", "min", "max", "cond", "near", "sort")}
+    if fl["sort"] not in SORTS: fl["sort"] = "new"
     view = "list" if request.args.get("view") == "list" else "grid"
     sql = """SELECT l.*, (SELECT COUNT(*) FROM listing_photos p WHERE p.listing_id=l.id) n_photos
         FROM listings l WHERE status='active'"""; args = []
-    if q:
-        sql += " AND (title LIKE ? OR body LIKE ? OR location LIKE ?)"; args += [f"%{q}%"] * 3
-    if cat in CATEGORIES:
-        sql += " AND category=?"; args.append(cat)
-    rows = db().execute(sql + " ORDER BY id DESC", args).fetchall()
-    def view_url(v): return url_for("browse", q=q or None, cat=cat or None, view=v if v == "list" else None)
-    return page("Marketplace", BROWSE, rows=rows, q=q, cat=cat, cats=CATEGORIES, view=view, view_url=view_url)
+    if fl["q"]:
+        sql += " AND (title LIKE ? OR body LIKE ? OR location LIKE ?)"; args += [f"%{fl['q']}%"] * 3
+    if fl["cat"] in CATEGORIES:
+        sql += " AND category=?"; args.append(fl["cat"])
+    if fl["cond"] in CONDITIONS:
+        sql += " AND condition=?"; args.append(fl["cond"])
+    if fl["near"]:
+        sql += " AND location LIKE ?"; args.append(f"%{fl['near']}%")
+    lo, hi = parse_money(fl["min"]), parse_money(fl["max"])
+    if lo: sql += " AND price>=?"; args.append(lo)
+    if hi: sql += " AND price<=?"; args.append(hi)
+    rows = db().execute(sql + " ORDER BY " + SORTS[fl["sort"]][1], args).fetchall()
+    keep = {k: v for k, v in fl.items() if v and not (k == "sort" and v == "new")}
+    def view_url(v): return url_for("browse", **keep, view=v if v == "list" else None)
+    filtering = any(fl[k] for k in ("min", "max", "cond", "near")) or fl["sort"] != "new"
+    return page("Marketplace", BROWSE, rows=rows, fl=fl, cats=CATEGORIES, conditions=CONDITIONS, sorts=SORTS,
+                view=view, view_url=view_url, filtering=filtering)
 
 LISTING = """<div class="two"><div>{% if photos %}<a id="mainlink" href="/uploads/{{ photos[0] }}" target="_blank" class="gallery-main">
 <img id="mainphoto" src="/uploads/{{ photos[0] }}" alt="{{ l.title }}"></a>
@@ -464,18 +521,31 @@ document.querySelectorAll('.strip button').forEach(function(x){x.classList.toggl
 <form method="post" action="/listing/{{ l.id }}/photos" enctype="multipart/form-data" class="card" style="margin-top:10px">
 <input type="hidden" name="csrf" value="{{ csrf() }}"><label for="addphotos">Add photos (up to {{ max_photos - photos|length }} more)</label>
 <input id="addphotos" type="file" name="photos" accept="image/*" multiple required><button class="btn primary">Upload photos</button></form>{% endif %}</div>
-<div class="card"><h1 style="margin:0 0 4px">{{ l.title }}</h1><div class="price" style="font-size:24px">{{ l.price|money }}</div>
-<p class="meta">{{ l.category }} · {{ l.location }} · Listed {{ l.created[:10] }} by <b>{{ seller }}</b>
+<div class="card"><h1 style="margin:0 0 4px">{{ l.title }}</h1>
+<div class="price" style="font-size:24px">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div>
+<p class="meta">Listed {{ l.created|ago }}{% if l.location %} in {{ l.location }}{% endif %}
 {% if l.status != 'active' %} · <span class="badge {{ l.status }}">{{ l.status }}</span>{% endif %}</p>
+<div class="chips">{% if l.condition %}<span class="badge">{{ l.condition }}</span>{% endif %}<span class="badge">{{ l.category }}</span></div>
 <p style="white-space:pre-wrap">{{ l.body }}</p>
-{% if not me %}<a class="btn primary" href="/login?next=/listing/{{ l.id }}">Log in to buy</a>
-{% elif me.id == l.seller_id %}<p class="meta">This is your listing.</p>
-{% if l.status == 'active' %}<form method="post" action="/listing/{{ l.id }}/remove"><input type="hidden" name="csrf" value="{{ csrf() }}">
-<button class="btn danger">Remove listing</button></form>{% endif %}
+<a class="card" href="/u/{{ seller.username }}" style="display:flex;gap:10px;align-items:center;text-decoration:none;color:inherit;margin-bottom:12px">
+<div style="min-width:0"><b>{{ seller.username }}</b><div class="meta">{% if seller.n_ratings %}<span class="stars">{{ seller.avg|stars }}</span> {{ '%.1f'|format(seller.avg) }} ({{ seller.n_ratings }}){% else %}No ratings yet{% endif %}
+ · Joined {{ seller.joined }}{% if seller.sold %} · {{ seller.sold }} sold{% endif %}</div></div></a>
+{% if not me %}<a class="btn primary" href="/login?next=/listing/{{ l.id }}">Log in to message or buy</a>
+{% elif me.id == l.seller_id %}<p class="meta">This is your listing.{% if n_convs %} <a href="/inbox">{{ n_convs }} {{ 'person' if n_convs == 1 else 'people' }} messaged you</a>.{% endif %}</p>
+{% if l.status == 'active' %}<div class="row"><a class="btn" href="/listing/{{ l.id }}/edit">Edit listing</a>
+<form method="post" action="/listing/{{ l.id }}/remove"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<button class="btn danger">Remove listing</button></form></div>{% endif %}
 {% elif l.status == 'active' %}<form method="post" action="/listing/{{ l.id }}/buy"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn primary" style="width:100%;padding:12px">🛡️ Buy with Safe Transfer · {{ l.price|money }}</button></form>
 <p class="meta">Your wallet: {{ bal|money }}{% if bal < l.price %} · <a href="/wallet">add funds</a>{% endif %}</p>
+<div class="card" style="margin:10px 0">{% if conv %}<a class="btn" href="/inbox/{{ conv }}">Open your conversation with {{ seller.username }}</a>
+{% else %}<form method="post" action="/listing/{{ l.id }}/message"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="firstmsg">Send seller a message</label><div class="chips">{% for t in ["Is this still available?", "Is the price negotiable?", "When can I pick it up?"] %}
+<button type="button" class="btn" onclick="document.getElementById('firstmsg').value=this.textContent">{{ t }}</button>{% endfor %}</div>
+<textarea id="firstmsg" name="body" rows="2" maxlength="1000" required>Is this still available?</textarea><button class="btn primary">Send</button></form>{% endif %}</div>
 {% else %}<p class="meta">This item is no longer available.</p>{% endif %}
+{% if me and me.id != l.seller_id %}<form method="post" action="/listing/{{ l.id }}/save"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<button class="btn">{{ '♥ Saved' if is_saved else '♡ Save' }}</button></form>{% endif %}
 <div class="shield"><b>How Safe Transfer works</b><ol style="margin:6px 0 0;padding-left:20px">
 <li>You pay. The money is held by SafeTrade, not the seller.</li><li>Meet up or get it shipped.</li>
 <li>Seller confirms handover, you confirm it's as described.</li><li>Then you have <b>{{ RETURN_PERIOD }}</b> to return it, no questions asked, for a full refund.</li>
@@ -486,10 +556,15 @@ document.querySelectorAll('.strip button').forEach(function(x){x.classList.toggl
 def listing(lid):
     l = db().execute("SELECT * FROM listings WHERE id=?", (lid,)).fetchone()
     if not l or l["status"] == "removed": abort(404)
-    seller = db().execute("SELECT username FROM users WHERE id=?", (l["seller_id"],)).fetchone()[0]
-    me = current_user()
-    return page(l["title"], LISTING, l=l, seller=seller, bal=balance(db(), me["id"]) if me else 0,
-                photos=listing_photos(lid), max_photos=MAX_PHOTOS)
+    me = current_user(); conv = n_convs = is_saved = None
+    if me and me["id"] == l["seller_id"]:
+        n_convs = db().execute("SELECT COUNT(*) FROM conversations WHERE listing_id=?", (lid,)).fetchone()[0]
+    elif me:
+        c = db().execute("SELECT id FROM conversations WHERE listing_id=? AND buyer_id=?", (lid, me["id"])).fetchone()
+        conv = c[0] if c else None
+        is_saved = db().execute("SELECT 1 FROM saved WHERE user_id=? AND listing_id=?", (me["id"], lid)).fetchone()
+    return page(l["title"], LISTING, l=l, seller=user_card(l["seller_id"]), bal=balance(db(), me["id"]) if me else 0,
+                photos=listing_photos(lid), max_photos=MAX_PHOTOS, conv=conv, n_convs=n_convs, is_saved=is_saved)
 
 @app.route("/listing/<int:lid>/photos", methods=["POST"])
 def add_photos(lid):
@@ -522,11 +597,170 @@ def remove_listing(lid):
     flash("Listing removed." if n else "Can't remove this listing.", "ok" if n else "err")
     return redirect(url_for("orders") if n else url_for("listing", lid=lid))
 
+def user_card(uid):
+    """What buyers judge a seller by: ratings, when they joined, how many sales went through."""
+    u = db().execute("SELECT id, username, created FROM users WHERE id=?", (uid,)).fetchone()
+    avg, n = db().execute("SELECT AVG(stars), COUNT(*) FROM ratings WHERE ratee_id=?", (uid,)).fetchone()
+    sold = db().execute("SELECT COUNT(*) FROM orders WHERE seller_id=? AND status='released'", (uid,)).fetchone()[0]
+    return {"id": u["id"], "username": u["username"], "avg": avg or 0, "n_ratings": n, "sold": sold,
+            "joined": datetime.fromisoformat(u["created"]).strftime("%B %Y") if u["created"] else ""}
+
+def unread_count(uid):
+    return db().execute("""SELECT COUNT(*) FROM conversations WHERE last_from IS NOT NULL AND last_from!=? AND
+        ((buyer_id=? AND last_at > COALESCE(buyer_seen,'')) OR (seller_id=? AND last_at > COALESCE(seller_seen,'')))""",
+        (uid, uid, uid)).fetchone()[0]
+
+def post_chat(cid, uid, body):
+    db().execute("INSERT INTO chat(conv_id,user_id,body,created) VALUES(?,?,?,?)", (cid, uid, body, now()))
+    db().execute("UPDATE conversations SET last_at=?, last_from=?, last_body=? WHERE id=?", (now(), uid, body[:120], cid))
+
+EDIT = """<div class="card" style="max-width:620px;margin:auto"><h2 style="margin-top:0">Edit listing</h2>
+<form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="t">Title</label><input id="t" name="title" required maxlength="100" value="{{ f.title }}">
+<label for="p">Price (USD)</label><input id="p" name="price" required inputmode="decimal" value="{{ f.price }}">
+<p class="meta" style="margin-top:-6px">Lowering the price shows buyers the old price crossed out.</p>
+<label for="cat">Category</label><select id="cat" name="category">{% for c in cats %}<option {{ 'selected' if c==f.category }}>{{ c }}</option>{% endfor %}</select>
+<label for="cond">Condition</label><select id="cond" name="condition">{% for c in conditions %}<option {{ 'selected' if c==f.condition }}>{{ c }}</option>{% endfor %}</select>
+<label for="loc">Location</label><input id="loc" name="location" maxlength="60" value="{{ f.location }}">
+<label for="d">Description</label><textarea id="d" name="body" rows="5" maxlength="3000">{{ f.body }}</textarea>
+<div class="row"><button class="btn primary">Save changes</button><a class="btn" href="/listing/{{ lid }}">Cancel</a></div></form></div>"""
+
+@app.route("/listing/<int:lid>/edit", methods=["GET", "POST"])
+def edit_listing(lid):
+    me = login_required()
+    l = db().execute("SELECT * FROM listings WHERE id=? AND seller_id=? AND status='active'", (lid, me["id"])).fetchone()
+    if not l: abort(404)
+    if request.method == "POST":
+        f = {k: request.form.get(k, "").strip() for k in ("title", "price", "category", "condition", "location", "body")}
+        price = parse_money(f["price"])
+        if not f["title"]: flash("Add a title.", "err")
+        elif price is None: flash("Enter a price between $0.01 and $10,000,000.", "err")
+        else:
+            # Keep the highest earlier price so a series of cuts still shows the full drop; a raise clears it.
+            was = max(l["was_price"] or 0, l["price"]) if price < l["price"] else (l["was_price"] if price < (l["was_price"] or 0) else None)
+            db().execute("""UPDATE listings SET title=?, price=?, was_price=?, category=?, condition=?, location=?, body=? WHERE id=?""",
+                         (f["title"][:100], price, was, f["category"] if f["category"] in CATEGORIES else "Other",
+                          f["condition"] if f["condition"] in CONDITIONS else None, f["location"][:60], f["body"][:3000], lid))
+            flash("Listing updated.")
+            return redirect(url_for("listing", lid=lid))
+    else:
+        f = dict(l); f["price"] = f"{l['price']/100:.2f}"
+    return page("Edit listing", EDIT, f=f, lid=lid, cats=CATEGORIES, conditions=CONDITIONS)
+
+@app.route("/listing/<int:lid>/save", methods=["POST"])
+def save_listing(lid):
+    me = login_required()
+    if not db().execute("SELECT 1 FROM listings WHERE id=? AND status!='removed' AND seller_id!=?", (lid, me["id"])).fetchone(): abort(404)
+    if db().execute("DELETE FROM saved WHERE user_id=? AND listing_id=?", (me["id"], lid)).rowcount:
+        flash("Removed from Saved.")
+    else:
+        db().execute("INSERT INTO saved(user_id,listing_id,created) VALUES(?,?,?)", (me["id"], lid, now()))
+        flash("Saved. Find it under Saved in the menu.")
+    return redirect(url_for("listing", lid=lid))
+
+SAVED = """<h2>Saved</h2>{% if not rows %}<p class="meta">Nothing saved yet. Tap ♡ Save on any listing to keep track of it.</p>{% endif %}
+<div class="rows">{% for l in rows %}<a class="card rowitem" href="/listing/{{ l.id }}"><div class="thumb">
+{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
+<div class="info"><div class="price">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div><div>{{ l.title }}</div>
+<div class="meta">{{ l.location }}{% if l.status != 'active' %} · <span class="badge {{ l.status }}">{{ 'sold' if l.status=='sold' else 'pending' if l.status=='pending' else 'no longer available' }}</span>{% endif %}</div></div></a>{% endfor %}</div>"""
+
+@app.route("/saved")
+def saved_page():
+    me = login_required()
+    rows = db().execute("""SELECT l.* FROM saved s JOIN listings l ON l.id=s.listing_id
+        WHERE s.user_id=? AND l.status!='removed' ORDER BY s.created DESC""", (me["id"],)).fetchall()
+    return page("Saved", SAVED, rows=rows)
+
+@app.route("/listing/<int:lid>/message", methods=["POST"])
+def message_seller(lid):
+    me = login_required()
+    l = db().execute("SELECT * FROM listings WHERE id=? AND status='active'", (lid,)).fetchone()
+    if not l or l["seller_id"] == me["id"]: abort(404)
+    body = request.form.get("body", "").strip()[:1000]
+    if not body:
+        flash("Write a message first.", "err"); return redirect(url_for("listing", lid=lid))
+    c = db().execute("SELECT id FROM conversations WHERE listing_id=? AND buyer_id=?", (lid, me["id"])).fetchone()
+    cid = c[0] if c else db().execute("INSERT INTO conversations(listing_id,buyer_id,seller_id,created,buyer_seen) VALUES(?,?,?,?,?)",
+                                      (lid, me["id"], l["seller_id"], now(), now())).lastrowid
+    post_chat(cid, me["id"], body)
+    return redirect(url_for("conversation", cid=cid))
+
+INBOX = """<h2>Inbox</h2>{% if not rows %}<p class="meta">No messages yet. Open any listing and tap "Is this still available?" to start.</p>{% endif %}
+<div class="rows">{% for c in rows %}<a class="card rowitem" href="/inbox/{{ c.id }}"><div class="thumb" style="width:64px">
+{% if c.image %}<img src="/uploads/{{ c.image|thumb }}" alt="">{% else %}No photo{% endif %}</div>
+<div class="info" style="flex:1"><div><b>{{ c.other }}</b> · {{ c.title }}</div>
+<div class="meta" style="{{ 'font-weight:700;color:var(--ink)' if c.unread }}">{{ 'You: ' if c.last_from == me.id }}{{ c.last_body }}</div>
+<div class="meta">{{ 'Buying' if c.buyer_id == me.id else 'Selling' }} · {{ c.last_at|ago }}</div></div>{% if c.unread %}<span class="dot">new</span>{% endif %}</a>{% endfor %}</div>"""
+
+@app.route("/inbox")
+def inbox():
+    me = login_required()
+    rows = db().execute("""SELECT c.*, l.title, l.image, u.username other,
+        (c.last_from!=? AND c.last_at > COALESCE(CASE WHEN c.buyer_id=? THEN c.buyer_seen ELSE c.seller_seen END,'')) unread
+        FROM conversations c JOIN listings l ON l.id=c.listing_id
+        JOIN users u ON u.id = CASE WHEN c.buyer_id=? THEN c.seller_id ELSE c.buyer_id END
+        WHERE (c.buyer_id=? OR c.seller_id=?) AND c.last_at IS NOT NULL ORDER BY c.last_at DESC""",
+        (me["id"],) * 5).fetchall()
+    return page("Inbox", INBOX, rows=rows)
+
+CONVO = """<p><a href="/inbox">&larr; Inbox</a></p><div class="two"><div class="card">
+<h3 style="margin-top:0">{{ other }}</h3><div class="bubbles">{% for m in msgs %}
+<div class="bubble {{ 'mine' if m.user_id == me.id }}">{{ m.body }}<div class="meta" style="{{ 'color:inherit;opacity:.8' if m.user_id == me.id }}">{{ m.created|ago }}</div></div>
+{% if m.user_id != me.id and m.offsite %}<div class="warn">⚠️ This message mentions paying or talking outside SafeTrade. Payments made outside SafeTrade aren't protected. Never send money by Zelle, Cash App, gift cards or wire.</div>{% endif %}
+{% endfor %}</div>
+<form method="post" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="reply">Message</label><textarea id="reply" name="body" rows="2" required maxlength="1000"></textarea><button class="btn primary">Send</button></form></div>
+<div class="card"><a href="/listing/{{ l.id }}" style="display:flex;gap:10px;text-decoration:none;color:inherit">
+<div class="thumb" style="width:72px;border-radius:8px">{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="">{% else %}No photo{% endif %}</div>
+<div><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}</div></div></a>
+{% if me.id == c.buyer_id and l.status == 'active' %}<form method="post" action="/listing/{{ l.id }}/buy" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<button class="btn primary" style="width:100%">🛡️ Buy with Safe Transfer</button></form>
+{% elif l.status != 'active' %}<p class="meta">This item is {{ 'sold' if l.status=='sold' else 'pending' if l.status=='pending' else 'no longer available' }}.</p>{% endif %}
+<p class="meta">Meet in a public place. Pay only with the Buy button so your money is protected.</p></div></div>"""
+
+@app.route("/inbox/<int:cid>", methods=["GET", "POST"])
+def conversation(cid):
+    me = login_required()
+    c = db().execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+    if not c or me["id"] not in (c["buyer_id"], c["seller_id"]): abort(404)
+    if request.method == "POST":
+        body = request.form.get("body", "").strip()[:1000]
+        if body: post_chat(cid, me["id"], body)
+        return redirect(url_for("conversation", cid=cid))
+    db().execute(f"UPDATE conversations SET {'buyer_seen' if me['id'] == c['buyer_id'] else 'seller_seen'}=? WHERE id=?", (now(), cid))
+    msgs = [dict(m, offsite=bool(OFF_SITE.search(m["body"]))) for m in
+            db().execute("SELECT * FROM chat WHERE conv_id=? ORDER BY id", (cid,)).fetchall()]
+    other_id = c["seller_id"] if me["id"] == c["buyer_id"] else c["buyer_id"]
+    other = db().execute("SELECT username FROM users WHERE id=?", (other_id,)).fetchone()[0]
+    l = db().execute("SELECT * FROM listings WHERE id=?", (c["listing_id"],)).fetchone()
+    return page("Messages", CONVO, c=c, l=l, msgs=msgs, other=other)
+
+PROFILE = """<div class="card"><h2 style="margin:0">{{ u.username }}</h2>
+<p class="meta" style="margin:4px 0">{% if u.n_ratings %}<span class="stars">{{ u.avg|stars }}</span> {{ '%.1f'|format(u.avg) }} from {{ u.n_ratings }} rating{{ 's' if u.n_ratings != 1 }}{% else %}No ratings yet{% endif %}
+ · Joined {{ u.joined }} · {{ u.sold }} completed sale{{ 's' if u.sold != 1 }}</p></div>
+<h3>Listings</h3>{% if not rows %}<p class="meta">No active listings.</p>{% endif %}
+<div class="grid">{% for l in rows %}<a class="card tile" href="/listing/{{ l.id }}"><div class="thumb">
+{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
+<div class="info"><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div></div></a>{% endfor %}</div>
+<h3>Ratings</h3>{% if not reviews %}<p class="meta">Ratings appear here after completed deals.</p>{% endif %}
+{% for r in reviews %}<div class="card" style="margin-bottom:8px"><span class="stars">{{ r.stars|stars }}</span> <b>{{ r.rater }}</b>
+<span class="meta">· {{ r.created|ago }}</span>{% if r.comment %}<div>{{ r.comment }}</div>{% endif %}</div>{% endfor %}"""
+
+@app.route("/u/<username>")
+def profile(username):
+    row = db().execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+    if not row: abort(404)
+    rows = db().execute("SELECT * FROM listings WHERE seller_id=? AND status='active' ORDER BY id DESC", (row[0],)).fetchall()
+    reviews = db().execute("""SELECT r.*, u.username rater FROM ratings r JOIN users u ON u.id=r.rater_id
+        WHERE r.ratee_id=? ORDER BY r.created DESC LIMIT 50""", (row[0],)).fetchall()
+    return page(username, PROFILE, u=user_card(row[0]), rows=rows, reviews=reviews)
+
 SELL = """<div class="card" style="max-width:620px;margin:auto"><h2>Sell an item</h2>
 <form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <label>Title</label><input name="title" required maxlength="100" value="{{ f.title }}">
 <label>Price (USD)</label><input name="price" required inputmode="decimal" placeholder="0.00" value="{{ f.price }}">
 <label>Category</label><select name="category">{% for c in cats %}<option {{ 'selected' if c==f.category }}>{{ c }}</option>{% endfor %}</select>
+<label for="condition">Condition</label><select id="condition" name="condition">{% for c in conditions %}<option {{ 'selected' if c==(f.condition or 'Used - Good') }}>{{ c }}</option>{% endfor %}</select>
 <label>Location</label><input name="location" maxlength="60" placeholder="City, State" value="{{ f.location }}">
 <label>Description</label><textarea name="body" rows="5" maxlength="3000">{{ f.body }}</textarea>
 <label for="photos">Photos (up to {{ max_photos }})</label>
@@ -539,7 +773,7 @@ SELL = """<div class="card" style="max-width:620px;margin:auto"><h2>Sell an item
 @app.route("/sell", methods=["GET", "POST"])
 def sell():
     me = login_required()
-    f = {k: request.form.get(k, "").strip() for k in ("title", "price", "category", "location", "body")}
+    f = {k: request.form.get(k, "").strip() for k in ("title", "price", "category", "condition", "location", "body")}
     kept = []
     if request.method == "POST":
         # Photos are saved before the other fields are checked, so a typo never makes the seller pick them again.
@@ -550,15 +784,16 @@ def sell():
         if not f["title"]: flash("Add a title.", "err")
         elif price is None: flash("Enter a price between $0.01 and $10,000,000.", "err")
         else:
-            lid = db().execute("""INSERT INTO listings(seller_id,title,body,price,category,location,created)
-                VALUES(?,?,?,?,?,?,?)""", (me["id"], f["title"][:100], f["body"][:3000], price,
-                f["category"] if f["category"] in CATEGORIES else "Other", f["location"][:60], now())).lastrowid
+            lid = db().execute("""INSERT INTO listings(seller_id,title,body,price,category,condition,location,created)
+                VALUES(?,?,?,?,?,?,?,?)""", (me["id"], f["title"][:100], f["body"][:3000], price,
+                f["category"] if f["category"] in CATEGORIES else "Other",
+                f["condition"] if f["condition"] in CONDITIONS else None, f["location"][:60], now())).lastrowid
             attach_photos(lid, kept)
             msg = "Your listing is live."
             if bad: msg += f" {bad} file{'s' if bad != 1 else ''} couldn't be read as a photo and {'were' if bad != 1 else 'was'} skipped."
             flash(msg)
             return redirect(url_for("listing", lid=lid))
-    return page("Sell", SELL, f=f, cats=CATEGORIES, kept=kept, max_photos=MAX_PHOTOS)
+    return page("Sell", SELL, f=f, cats=CATEGORIES, conditions=CONDITIONS, kept=kept, max_photos=MAX_PHOTOS)
 
 PHOTO_NAME = re.compile(r"[0-9a-f]{24}\.jpg")
 
@@ -666,6 +901,13 @@ If it comes back damaged or never arrives, open a dispute.{% endif %}</div>
 {{ dispute_form|safe }}
 {% elif o.status=='disputed' %}<div class="shield">⚠️ Disputed by {{ 'buyer' if o.dispute_by==o.buyer_id else 'seller' }}: "{{ o.dispute_reason }}".
 Funds are frozen until SafeTrade reviews the case.</div>{% endif %}</div>
+{% if o.status == 'released' and role != 'admin' %}<div class="card" style="margin-top:14px">
+{% if my_rating %}<b>You rated {{ o.seller if role=='buyer' else o.buyer }}</b> <span class="stars">{{ my_rating.stars|stars }}</span>{% if my_rating.comment %}<p>"{{ my_rating.comment }}"</p>{% endif %}
+{% else %}<form method="post" action="/order/{{ o.id }}/rate"><input type="hidden" name="csrf" value="{{ csrf() }}">
+<label for="stars">How was it dealing with {{ o.seller if role=='buyer' else o.buyer }}?</label>
+<select id="stars" name="stars">{% for n in [5,4,3,2,1] %}<option value="{{ n }}">{{ n|stars }} {{ n }}</option>{% endfor %}</select>
+<label for="rc">Comment (optional, shown on their profile)</label><input id="rc" name="comment" maxlength="300" placeholder="On time, item as described">
+<button class="btn primary">Leave rating</button></form>{% endif %}</div>{% endif %}
 <div class="card" style="margin-top:14px"><h3 style="margin-top:0">History</h3>{% for e in events %}
 <div class="meta">{{ e.created.replace('T',' ') }} · <b>{{ e.username }}</b> · {{ e.text }}</div>{% endfor %}</div></div>
 <div class="card"><h3 style="margin-top:0">Messages</h3>{% if not msgs %}<p class="meta">Arrange pickup or shipping here.</p>{% endif %}
@@ -693,7 +935,25 @@ def order(oid):
         LEFT JOIN users u ON u.id=e.user_id WHERE order_id=? ORDER BY e.id""", (oid,)).fetchall()
     msgs = db().execute("SELECT m.*, u.username FROM messages m JOIN users u ON u.id=m.user_id WHERE order_id=? ORDER BY m.id", (oid,)).fetchall()
     dispute_form = render_template_string(DISPUTE_FORM, o=o)
-    return page("Order #%d" % oid, ORDER, o=o, role=role, events=events, msgs=msgs, today=now(), dispute_form=dispute_form)
+    my_rating = db().execute("SELECT * FROM ratings WHERE order_id=? AND rater_id=?", (oid, me["id"])).fetchone()
+    return page("Order #%d" % oid, ORDER, o=o, role=role, events=events, msgs=msgs, today=now(), dispute_form=dispute_form,
+                my_rating=my_rating)
+
+@app.route("/order/<int:oid>/rate", methods=["POST"])
+def rate_route(oid):
+    me = login_required(); o = load_order(oid, me)
+    if o["status"] != "released" or me["id"] not in (o["buyer_id"], o["seller_id"]): abort(403)
+    try: stars = int(request.form.get("stars", ""))
+    except ValueError: stars = 0
+    if not 1 <= stars <= 5: abort(400)
+    other = o["seller_id"] if me["id"] == o["buyer_id"] else o["buyer_id"]
+    try:
+        db().execute("INSERT INTO ratings(order_id,rater_id,ratee_id,stars,comment,created) VALUES(?,?,?,?,?,?)",
+                     (oid, me["id"], other, stars, request.form.get("comment", "").strip()[:300], now()))
+        flash("Thanks, your rating is on their profile.")
+    except sqlite3.IntegrityError:
+        flash("You already rated this deal.", "err")
+    return redirect(url_for("order", oid=oid))
 
 def order_action(oid, fn, ok_msg):
     me = login_required()
