@@ -51,7 +51,7 @@ assert b"1 person messaged you" in alice.get("/listing/1").data
 
 # saved items
 post(bob, "/listing/2/save"); assert b"Mid-century armchair" in bob.get("/saved").data
-assert "♥ Saved".encode() in bob.get("/listing/2").data
+assert b">Saved</button>" in bob.get("/listing/2").data
 assert post(bob, "/listing/3/save").status_code == 404   # own listing
 post(bob, "/listing/2/save"); assert b"Mid-century armchair" not in bob.get("/saved").data
 

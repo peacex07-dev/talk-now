@@ -96,7 +96,7 @@ def post(c, url, **data): return c.post(url, data={"csrf": tok(c), **data})
 def login(c, u, pw="demo1234"): return post(c, "/login", username=u, password=pw)
 
 anon = client()
-h = anon.get("/").data; assert b"iPhone 14" in h and b"Protected:" in h
+h = anon.get("/").data; assert b"iPhone 14" in h and b"<span class=\"tag\">Protected</span>" in h
 assert anon.get("/sell").status_code == 302 and anon.get("/wallet").status_code == 302
 assert anon.post("/login", data={"username": "alice", "password": "demo1234"}).status_code == 400   # CSRF
 assert b"Wrong username" in login(client(), "alice", "nope").data

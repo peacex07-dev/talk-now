@@ -20,8 +20,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("SAFETRADE_DB", os.path.join(HERE, "safetrade.db"))
 UPLOADS = os.environ.get("SAFETRADE_UPLOADS", os.path.join(HERE, "uploads"))
 CATEGORIES = ["Electronics", "Furniture", "Vehicles", "Clothing", "Home & Garden", "Sports", "Toys", "Other"]
-ICON = {"Electronics": "📱", "Furniture": "🛋️", "Vehicles": "🚗", "Clothing": "👕", "Home & Garden": "🪴",
-        "Sports": "🚲", "Toys": "🧸", "Other": "📦"}
 MAX_PRICE_CENTS = 10_000_000_00   # $10,000,000 cap per listing / deposit
 MAX_PHOTOS = 8                    # photos per listing
 CONDITIONS = ["New", "Used - Like new", "Used - Good", "Used - Fair"]
@@ -350,46 +348,69 @@ def safe_next(n): return n if n and n.startswith("/") and not n.startswith("//")
 
 # ---------- Templates ----------
 BASE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title }} · SafeTrade</title><style>
-:root{--bg:#f5f6f8;--card:#fff;--ink:#1c1e21;--muted:#65676b;--line:#dadde1;--brand:#0a7c55;--brand-ink:#fff;--warn:#b54708;--bad:#b42318;--soft:#e7f6ef}
-@media (prefers-color-scheme:dark){:root{--bg:#18191a;--card:#242526;--ink:#e4e6eb;--muted:#b0b3b8;--line:#3a3b3c;--soft:#173528}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-a{color:var(--brand)}header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-nav{max-width:1100px;margin:auto;display:flex;gap:8px 16px;align-items:center;padding:8px 16px;flex-wrap:wrap}
-nav .logo{font-weight:800;font-size:20px;text-decoration:none;color:var(--brand);margin-right:auto}nav a{text-decoration:none;font-weight:600}
-nav .links{display:flex;gap:16px;align-items:center;overflow-x:auto;white-space:nowrap;max-width:100%;scrollbar-width:none}
-.dot{display:inline-block;min-width:18px;padding:0 5px;border-radius:9px;background:var(--bad);color:#fff;font-size:12px;text-align:center}
-.bubbles{display:flex;flex-direction:column;gap:6px}.bubble{max-width:80%;padding:8px 12px;border-radius:14px;background:var(--bg);white-space:pre-wrap}
-.bubble.mine{align-self:flex-end;background:var(--brand);color:var(--brand-ink)}.warn{background:#fff3e0;color:#7a3405;border-radius:8px;padding:8px 10px;font-size:14px}
-.stars{color:#b7791f;letter-spacing:1px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
-s.was{color:var(--muted);font-weight:400;font-size:14px;margin-left:6px}
-main{max-width:1100px;margin:auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.tile{text-decoration:none;color:inherit;padding:0;overflow:hidden;display:block}
-.thumb{aspect-ratio:1;max-width:100%;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.gallery-main{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%;background:#111;border-radius:12px;overflow:hidden;color:#bbb}
+<title>{{ title }} · SafeTrade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
+<style>
+/* Field-gear look: charcoal ground, square edges, blaze-orange actions, olive for anything protected. One dark theme. */
+:root{--bg:#121417;--card:#1a1d21;--field:#0e1012;--soft:#22262b;--line:#2e3338;--ink:#e9e6df;--muted:#a3a79f;
+--brand:#e8702a;--brand-ink:#121417;--olive:#9fb064;--olive-dk:#2c331f;--warn:#e0a43a;--bad:#ef5b5b;--r:3px;
+--head:"Barlow Condensed","Arial Narrow",sans-serif;--body:Barlow,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--body)}
+a{color:var(--brand)}a:hover{color:#ff8a45}h1,h2,h3{font-family:var(--head);font-weight:700;text-transform:uppercase;letter-spacing:.02em;line-height:1.1;text-wrap:balance}
+h2{font-size:26px}h3{font-size:19px}
+header{background:#0b0d0f;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+nav{max-width:1100px;margin:auto;display:flex;gap:8px 18px;align-items:center;padding:10px 16px;flex-wrap:wrap}
+nav .logo{display:flex;gap:8px;align-items:center;font:700 22px/1 var(--head);letter-spacing:.08em;text-transform:uppercase;text-decoration:none;color:var(--ink);margin-right:auto}
+nav .logo svg{width:28px;height:22px}nav a{text-decoration:none;font-weight:600;color:var(--muted)}nav a:hover{color:var(--ink)}
+nav .links{display:flex;gap:18px;align-items:center;overflow-x:auto;white-space:nowrap;max-width:100%;scrollbar-width:none;font-size:15px}
+.dot{display:inline-block;min-width:18px;padding:0 5px;border-radius:var(--r);background:var(--brand);color:var(--brand-ink);font-size:12px;font-weight:700;text-align:center}
+.bubbles{display:flex;flex-direction:column;gap:6px}.bubble{max-width:80%;padding:8px 12px;border-radius:var(--r);background:var(--soft);white-space:pre-wrap}
+.bubble.mine{align-self:flex-end;background:var(--olive-dk);color:var(--ink)}
+.warn{background:#2a2110;color:var(--warn);border:1px solid #4a3a1a;border-radius:var(--r);padding:8px 10px;font-size:14px}
+.stars{color:var(--warn);letter-spacing:1px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+s.was{color:var(--muted);font-weight:400;font-size:15px;margin-left:8px;font-family:var(--body)}
+main{max-width:1100px;margin:auto;padding:18px 16px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px}
+.tile{text-decoration:none;color:inherit;padding:0;overflow:hidden;display:block;transition:border-color .15s}.tile:hover,.rowitem:hover{border-color:var(--brand)}
+.thumb{aspect-ratio:1;max-width:100%;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.08em;overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.gallery-main{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;max-width:100%;background:#0a0b0c;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;color:var(--muted)}
 .gallery-main img{width:100%;height:100%;object-fit:contain;display:block}
-.strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0}.strip button{padding:0;border:2px solid transparent;border-radius:8px;overflow:hidden;background:none;cursor:pointer;flex:none}
+.strip{display:flex;gap:8px;overflow-x:auto;padding:8px 0}.strip button{padding:0;border:2px solid var(--line);border-radius:var(--r);overflow:hidden;background:none;cursor:pointer;flex:none}
 .strip button.on{border-color:var(--brand)}.strip img{width:64px;height:64px;object-fit:cover;display:block}
-.rows{display:flex;flex-direction:column;gap:10px}.rowitem{display:flex;gap:12px;align-items:center;text-decoration:none;color:inherit;padding:8px}
-.rowitem .thumb{width:96px;flex:none;border-radius:8px}.rowitem .info{min-width:0}
+.rows{display:flex;flex-direction:column;gap:8px}.rowitem{display:flex;gap:14px;align-items:center;text-decoration:none;color:inherit;padding:8px}
+.rowitem .thumb{width:96px;flex:none;border-radius:var(--r)}.rowitem .info{min-width:0}
 .views{display:flex;gap:6px;margin-left:auto}.views a{text-decoration:none}
-.tile .info{padding:10px 12px}.price{font-weight:800;font-size:18px}.meta{color:var(--muted);font-size:14px}
-.btn{display:inline-block;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:9px 14px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none}
-.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}.btn.danger{color:var(--bad)}
-input,textarea,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--card);color:var(--ink);margin:4px 0 12px}
-label{font-weight:600;font-size:14px}form.inline{display:inline}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.notice{padding:10px 14px;border-radius:8px;margin-bottom:14px;background:var(--soft)}.notice.err{background:#fde8e7;color:var(--bad)}
-.badge{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--soft);color:var(--brand)}
-.badge.disputed,.badge.pending{background:#fff3e0;color:var(--warn)}.badge.refunded{background:#eee;color:#555}
-.shield{background:var(--soft);border-radius:10px;padding:12px 14px;margin:12px 0}
-.steps{list-style:none;padding:0;margin:0}.steps li{padding:8px 0 8px 32px;position:relative;border-left:2px solid var(--line);margin-left:10px}
-.steps li:before{content:"";position:absolute;left:-9px;top:10px;width:16px;height:16px;border-radius:50%;background:var(--card);border:2px solid var(--line)}
-.steps li.done:before{background:var(--brand);border-color:var(--brand)}.steps li.done{border-color:var(--brand)}
+.tile .info{padding:10px 12px 12px}.price{font:700 22px/1.1 var(--head);letter-spacing:.02em}.meta{color:var(--muted);font-size:14px}
+.btn{display:inline-block;border:1px solid var(--line);background:var(--soft);color:var(--ink);padding:9px 16px;border-radius:var(--r);
+font:600 16px/1.2 var(--head);text-transform:uppercase;letter-spacing:.06em;cursor:pointer;text-decoration:none}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}.btn.primary:hover{background:#ff8a45;border-color:#ff8a45;color:var(--brand-ink)}
+.btn.danger{color:var(--bad)}.btn.danger:hover{border-color:var(--bad)}
+:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r);font:inherit;background:var(--field);color:var(--ink);margin:4px 0 12px}
+input:focus,textarea:focus,select:focus{border-color:var(--brand);outline:none}
+label{font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}form.inline{display:inline}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.notice{padding:10px 14px;border-radius:var(--r);margin-bottom:14px;background:var(--olive-dk);border:1px solid #3d4729}.notice.err{background:#2a1416;border-color:#5a2427;color:var(--bad)}
+.badge{display:inline-block;font:700 12px/1.6 var(--body);text-transform:uppercase;letter-spacing:.06em;padding:1px 8px;border-radius:var(--r);border:1px solid #3d4729;background:var(--olive-dk);color:var(--olive)}
+.badge.disputed,.badge.pending{background:#2a2110;border-color:#4a3a1a;color:var(--warn)}.badge.refunded,.badge.removed{background:var(--soft);border-color:var(--line);color:var(--muted)}
+.shield{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--olive);border-radius:var(--r);padding:12px 14px;margin:12px 0}
+.tag{font:700 14px/1 var(--head);text-transform:uppercase;letter-spacing:.08em;color:var(--olive);margin-right:6px}
+.steps{list-style:none;padding:0;margin:8px 0}.steps li{padding:8px 0 8px 30px;position:relative;border-left:2px solid var(--line);margin-left:8px}
+.steps li:before{content:"";position:absolute;left:-8px;top:12px;width:14px;height:14px;background:var(--bg);border:2px solid var(--line)}
+.steps li.done:before{background:var(--olive);border-color:var(--olive)}.steps li.done{border-color:var(--olive)}
 .two{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:start}@media(max-width:760px){.two{grid-template-columns:1fr}}
-table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
-.msg{padding:8px 10px;border-radius:8px;background:var(--bg);margin:6px 0}
-.testmode{background:#fff3e0;color:#7a3405;text-align:center;font-size:14px;padding:8px 16px}
-</style></head><body><header><nav><a class="logo" href="/">🛡️ SafeTrade</a>
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+th{font:600 13px var(--body);text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.msg{padding:8px 10px;border-radius:var(--r);background:var(--soft);margin:6px 0}
+.testmode{background:#1f1a0f;color:var(--warn);border-bottom:1px solid #3a2f17;text-align:center;font-size:13px;letter-spacing:.02em;padding:6px 16px}
+details>summary{list-style:none}details>summary::-webkit-details-marker{display:none}
+.btn.chip{font:500 14px/1.2 var(--body);text-transform:none;letter-spacing:0;padding:7px 12px}
+h1.item{text-transform:none;letter-spacing:0;font-size:30px}
+form .q{flex:3 1 260px;margin:0}form .cat{flex:1 1 120px;margin:0}details.filters[open]{flex-basis:100%}
+</style></head><body><header><nav><a class="logo" href="/" aria-label="SafeTrade home"><svg viewBox="0 0 28 22" aria-hidden="true">
+<path d="M1 21 10 5l5 8 3-4 9 12z" fill="none" stroke="#e8702a" stroke-width="2" stroke-linejoin="miter"/></svg>SafeTrade</a>
 {% if me %}<a class="btn primary" href="/sell">+ Sell</a>
 <div class="links"><a href="/">Browse</a><a href="/inbox">Inbox{% if unread %} <span class="dot">{{ unread }}</span>{% endif %}</a><a href="/saved">Saved</a>
 <a href="/neighbors">Neighbors</a><a href="/orders">Orders</a><a href="/wallet">Wallet {{ bal|money }}</a><a href="/u/{{ me.username }}">Profile</a>
@@ -407,7 +428,7 @@ def page(title, tpl, **ctx):
 
 STATUS_LABEL = {"funded": "In escrow", "return_window": "Return window", "return_requested": "Return requested",
                 "disputed": "Disputed", "released": "Completed", "refunded": "Refunded"}
-app.jinja_env.globals.update(ICON=ICON, STATUS_LABEL=STATUS_LABEL, RETURN_PERIOD=days(RETURN_DAYS), FEE_PCT=FEE_PCT)
+app.jinja_env.globals.update(STATUS_LABEL=STATUS_LABEL, RETURN_PERIOD=days(RETURN_DAYS), FEE_PCT=FEE_PCT)
 app.jinja_env.filters["ago"] = ago
 app.jinja_env.filters["stars"] = lambda n: "★" * int(round(n or 0)) + "☆" * (5 - int(round(n or 0)))
 
@@ -458,10 +479,10 @@ def logout():
 
 # ---------- Routes: listings ----------
 BROWSE = """<form method="get" style="margin-bottom:12px"><div class="row">
-<input name="q" placeholder="Search Marketplace" value="{{ fl.q }}" style="flex:2;min-width:180px;margin:0" aria-label="Search">
-<select name="cat" style="flex:1;min-width:140px;margin:0" aria-label="Category"><option value="">All categories</option>
-{% for c in cats %}<option {{ 'selected' if c==fl.cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button></div>
-<details {{ 'open' if filtering }} style="margin-top:8px"><summary class="btn">Filters{% if filtering %} (on){% endif %}</summary>
+<input class="q" name="q" placeholder="Search Marketplace" value="{{ fl.q }}" aria-label="Search">
+<select class="cat" name="cat" aria-label="Category"><option value="">All categories</option>
+{% for c in cats %}<option {{ 'selected' if c==fl.cat }}>{{ c }}</option>{% endfor %}</select><button class="btn">Search</button>
+<details class="filters" {{ 'open' if filtering }}><summary class="btn">Filters{% if filtering %} (on){% endif %}</summary>
 <div class="card" style="margin-top:8px"><div class="row">
 <div style="flex:1;min-width:120px"><label for="min">Min price</label><input id="min" name="min" inputmode="decimal" placeholder="$0" value="{{ fl.min }}"></div>
 <div style="flex:1;min-width:120px"><label for="max">Max price</label><input id="max" name="max" inputmode="decimal" placeholder="Any" value="{{ fl.max }}"></div></div>
@@ -469,8 +490,8 @@ BROWSE = """<form method="get" style="margin-bottom:12px"><div class="row">
 {% for c in conditions %}<option {{ 'selected' if c==fl.cond }}>{{ c }}</option>{% endfor %}</select></div>
 <div style="flex:1;min-width:160px"><label for="near">Location</label><input id="near" name="near" placeholder="City or state" value="{{ fl.near }}"></div></div>
 <label for="sort">Sort by</label><select id="sort" name="sort">{% for k, v in sorts.items() %}<option value="{{ k }}" {{ 'selected' if k==fl.sort }}>{{ v[0] }}</option>{% endfor %}</select>
-<input type="hidden" name="view" value="{{ view if view=='list' }}"><div class="row"><button class="btn primary">Apply</button><a class="btn" href="/">Clear all</a></div></div></details></form>
-<div class="shield" style="margin:0 0 12px;padding:8px 12px;font-size:14px">🛡️ <b>Protected:</b> the seller is paid only after you both approve. {{ RETURN_PERIOD|capitalize }} returns, no questions asked.</div>
+<input type="hidden" name="view" value="{{ view if view=='list' }}"><div class="row"><button class="btn primary">Apply</button><a class="btn" href="/">Clear all</a></div></div></details></div></form>
+<div class="shield" style="margin:0 0 12px;padding:8px 12px;font-size:14px"><span class="tag">Protected</span>The seller is paid only after you both approve. {{ RETURN_PERIOD|capitalize }} returns, no questions asked.</div>
 <div class="row" style="margin-bottom:10px"><span class="meta">{{ rows|length }} listing{{ '' if rows|length == 1 else 's' }}</span>
 <div class="views"><a class="btn {{ 'primary' if view=='grid' }}" href="{{ view_url('grid') }}">Photos</a><a class="btn {{ 'primary' if view=='list' }}" href="{{ view_url('list') }}">List</a></div></div>
 {% if not rows %}<p class="meta">No listings match.</p>{% endif %}
@@ -521,7 +542,7 @@ document.querySelectorAll('.strip button').forEach(function(x){x.classList.toggl
 <form method="post" action="/listing/{{ l.id }}/photos" enctype="multipart/form-data" class="card" style="margin-top:10px">
 <input type="hidden" name="csrf" value="{{ csrf() }}"><label for="addphotos">Add photos (up to {{ max_photos - photos|length }} more)</label>
 <input id="addphotos" type="file" name="photos" accept="image/*" multiple required><button class="btn primary">Upload photos</button></form>{% endif %}</div>
-<div class="card"><h1 style="margin:0 0 4px">{{ l.title }}</h1>
+<div class="card"><h1 class="item" style="margin:0 0 4px">{{ l.title }}</h1>
 <div class="price" style="font-size:24px">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div>
 <p class="meta">Listed {{ l.created|ago }}{% if l.location %} in {{ l.location }}{% endif %}
 {% if l.status != 'active' %} · <span class="badge {{ l.status }}">{{ l.status }}</span>{% endif %}</p>
@@ -536,16 +557,16 @@ document.querySelectorAll('.strip button').forEach(function(x){x.classList.toggl
 <form method="post" action="/listing/{{ l.id }}/remove"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn danger">Remove listing</button></form></div>{% endif %}
 {% elif l.status == 'active' %}<form method="post" action="/listing/{{ l.id }}/buy"><input type="hidden" name="csrf" value="{{ csrf() }}">
-<button class="btn primary" style="width:100%;padding:12px">🛡️ Buy with Safe Transfer · {{ l.price|money }}</button></form>
+<button class="btn primary" style="width:100%;padding:13px;font-size:18px">Buy with Safe Transfer · {{ l.price|money }}</button></form>
 <p class="meta">Your wallet: {{ bal|money }}{% if bal < l.price %} · <a href="/wallet">add funds</a>{% endif %}</p>
 <div class="card" style="margin:10px 0">{% if conv %}<a class="btn" href="/inbox/{{ conv }}">Open your conversation with {{ seller.username }}</a>
 {% else %}<form method="post" action="/listing/{{ l.id }}/message"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <label for="firstmsg">Send seller a message</label><div class="chips">{% for t in ["Is this still available?", "Is the price negotiable?", "When can I pick it up?"] %}
-<button type="button" class="btn" onclick="document.getElementById('firstmsg').value=this.textContent">{{ t }}</button>{% endfor %}</div>
+<button type="button" class="btn chip" onclick="document.getElementById('firstmsg').value=this.textContent">{{ t }}</button>{% endfor %}</div>
 <textarea id="firstmsg" name="body" rows="2" maxlength="1000" required>Is this still available?</textarea><button class="btn primary">Send</button></form>{% endif %}</div>
 {% else %}<p class="meta">This item is no longer available.</p>{% endif %}
 {% if me and me.id != l.seller_id %}<form method="post" action="/listing/{{ l.id }}/save"><input type="hidden" name="csrf" value="{{ csrf() }}">
-<button class="btn">{{ '♥ Saved' if is_saved else '♡ Save' }}</button></form>{% endif %}
+<button class="btn">{{ 'Saved' if is_saved else 'Save' }}</button></form>{% endif %}
 <div class="shield"><b>How Safe Transfer works</b><ol style="margin:6px 0 0;padding-left:20px">
 <li>You pay. The money is held by SafeTrade, not the seller.</li><li>Meet up or get it shipped.</li>
 <li>Seller confirms handover, you confirm it's as described.</li><li>Then you have <b>{{ RETURN_PERIOD }}</b> to return it, no questions asked, for a full refund.</li>
@@ -658,7 +679,7 @@ def save_listing(lid):
         flash("Saved. Find it under Saved in the menu.")
     return redirect(url_for("listing", lid=lid))
 
-SAVED = """<h2>Saved</h2>{% if not rows %}<p class="meta">Nothing saved yet. Tap ♡ Save on any listing to keep track of it.</p>{% endif %}
+SAVED = """<h2>Saved</h2>{% if not rows %}<p class="meta">Nothing saved yet. Tap Save on any listing to keep track of it.</p>{% endif %}
 <div class="rows">{% for l in rows %}<a class="card rowitem" href="/listing/{{ l.id }}"><div class="thumb">
 {% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="{{ l.title }}" loading="lazy">{% else %}No photo{% endif %}</div>
 <div class="info"><div class="price">{{ l.price|money }}{% if l.was_price %}<s class="was">{{ l.was_price|money }}</s>{% endif %}</div><div>{{ l.title }}</div>
@@ -706,15 +727,15 @@ def inbox():
 CONVO = """<p><a href="/inbox">&larr; Inbox</a></p><div class="two"><div class="card">
 <h3 style="margin-top:0">{{ other }}</h3><div class="bubbles">{% for m in msgs %}
 <div class="bubble {{ 'mine' if m.user_id == me.id }}">{{ m.body }}<div class="meta" style="{{ 'color:inherit;opacity:.8' if m.user_id == me.id }}">{{ m.created|ago }}</div></div>
-{% if m.user_id != me.id and m.offsite %}<div class="warn">⚠️ This message mentions paying or talking outside SafeTrade. Payments made outside SafeTrade aren't protected. Never send money by Zelle, Cash App, gift cards or wire.</div>{% endif %}
+{% if m.user_id != me.id and m.offsite %}<div class="warn"><b>Warning:</b> this message mentions paying or talking outside SafeTrade. Payments made outside SafeTrade aren't protected. Never send money by Zelle, Cash App, gift cards or wire.</div>{% endif %}
 {% endfor %}</div>
 <form method="post" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <label for="reply">Message</label><textarea id="reply" name="body" rows="2" required maxlength="1000"></textarea><button class="btn primary">Send</button></form></div>
 <div class="card"><a href="/listing/{{ l.id }}" style="display:flex;gap:10px;text-decoration:none;color:inherit">
-<div class="thumb" style="width:72px;border-radius:8px">{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="">{% else %}No photo{% endif %}</div>
+<div class="thumb" style="width:72px;border-radius:3px">{% if l.image %}<img src="/uploads/{{ l.image|thumb }}" alt="">{% else %}No photo{% endif %}</div>
 <div><div class="price">{{ l.price|money }}</div><div>{{ l.title }}</div><div class="meta">{{ l.location }}</div></div></a>
 {% if me.id == c.buyer_id and l.status == 'active' %}<form method="post" action="/listing/{{ l.id }}/buy" style="margin-top:10px"><input type="hidden" name="csrf" value="{{ csrf() }}">
-<button class="btn primary" style="width:100%">🛡️ Buy with Safe Transfer</button></form>
+<button class="btn primary" style="width:100%">Buy with Safe Transfer</button></form>
 {% elif l.status != 'active' %}<p class="meta">This item is {{ 'sold' if l.status=='sold' else 'pending' if l.status=='pending' else 'no longer available' }}.</p>{% endif %}
 <p class="meta">Meet in a public place. Pay only with the Buy button so your money is protected.</p></div></div>"""
 
@@ -899,7 +920,7 @@ If it comes back damaged or never arrives, open a dispute.{% endif %}</div>
 {% if role=='seller' %}<form method="post" action="/order/{{ o.id }}/return/confirm" onsubmit="return confirm('Confirm you have the item back? The buyer gets a full refund.')"><input type="hidden" name="csrf" value="{{ csrf() }}">
 <button class="btn primary">I got it back, refund the buyer</button></form>{% endif %}
 {{ dispute_form|safe }}
-{% elif o.status=='disputed' %}<div class="shield">⚠️ Disputed by {{ 'buyer' if o.dispute_by==o.buyer_id else 'seller' }}: "{{ o.dispute_reason }}".
+{% elif o.status=='disputed' %}<div class="shield"><span class="tag" style="color:var(--warn)">Disputed</span>by {{ 'buyer' if o.dispute_by==o.buyer_id else 'seller' }}: "{{ o.dispute_reason }}".
 Funds are frozen until SafeTrade reviews the case.</div>{% endif %}</div>
 {% if o.status == 'released' and role != 'admin' %}<div class="card" style="margin-top:14px">
 {% if my_rating %}<b>You rated {{ o.seller if role=='buyer' else o.buyer }}</b> <span class="stars">{{ my_rating.stars|stars }}</span>{% if my_rating.comment %}<p>"{{ my_rating.comment }}"</p>{% endif %}
@@ -1006,7 +1027,7 @@ NEIGHBORS = """<div class="row" style="align-items:flex-end"><div style="flex:1;
 {% for k, label in HELP_KINDS.items() %}<a class="btn {{ 'primary' if k==kind }}" href="/neighbors?kind={{ k }}">{{ label }}</a>{% endfor %}</div>
 {% if not rows %}<p class="meta">Nothing here yet. <a href="/neighbors/new">Be the first to post</a>.</p>{% endif %}
 <div style="display:flex;flex-direction:column;gap:10px">{% for p in rows %}<a class="card" href="/neighbors/{{ p.id }}" style="text-decoration:none;color:inherit;display:flex;gap:14px;align-items:center">
-{% if p.image %}<img src="/uploads/{{ p.image|thumb }}" alt="" style="width:72px;height:72px;object-fit:cover;border-radius:8px">{% endif %}
+{% if p.image %}<img src="/uploads/{{ p.image|thumb }}" alt="" style="width:72px;height:72px;object-fit:cover;border-radius:3px">{% endif %}
 <div style="flex:1;min-width:0"><span class="badge {{ 'pending' if p.kind=='need' }}">{{ HELP_KINDS[p.kind] }}</span>
 {% if p.status=='done' %}<span class="badge refunded">Done</span>{% endif %}
 <div style="font-weight:700;margin-top:4px">{{ p.title }}</div><div class="meta">{{ p.username }} · {{ p.location or 'No location' }} · {{ p.n }} repl{{ 'y' if p.n==1 else 'ies' }}</div></div></a>{% endfor %}</div>"""
@@ -1056,7 +1077,7 @@ def neighbors_new():
 HELP_POST = """<p><a href="/neighbors">&larr; Neighbors</a></p><div class="two"><div class="card">
 <span class="badge {{ 'pending' if p.kind=='need' }}">{{ HELP_KINDS[p.kind] }}</span>{% if p.status=='done' %} <span class="badge refunded">Done</span>{% endif %}
 <h1 style="margin:8px 0 4px">{{ p.title }}</h1><p class="meta">Posted by <b>{{ p.username }}</b> · {{ p.location or 'No location' }} · {{ p.created[:10] }}</p>
-{% if p.image %}<img src="/uploads/{{ p.image }}" alt="" style="max-width:100%;border-radius:10px">{% endif %}
+{% if p.image %}<img src="/uploads/{{ p.image }}" alt="" style="max-width:100%;border-radius:3px">{% endif %}
 <p style="white-space:pre-wrap">{{ p.body }}</p>
 {% if me and me.id == p.user_id %}<div class="row">{% if p.status=='open' %}
 <form method="post" action="/neighbors/{{ p.id }}/status"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="status" value="done">
@@ -1112,7 +1133,7 @@ WALLET = """<div class="two"><div class="card"><h2 style="margin-top:0">Wallet</
 <p class="meta">Demo mode: deposits and withdrawals are simulated. No real money moves.</p></div>
 <div class="card"><h3 style="margin-top:0">Activity</h3>{% if not rows %}<p class="meta">No activity yet.</p>{% endif %}<table>
 {% for r in rows %}<tr><td>{{ r.created[:10] }}</td><td>{{ labels[r.kind] }}{% if r.order_id %} <a href="/order/{{ r.order_id }}">#{{ r.order_id }}</a>{% endif %}</td>
-<td style="text-align:right;color:{{ 'var(--brand)' if r.amount>0 else 'inherit' }}">{{ '+' if r.amount>0 }}{{ r.amount|money }}</td></tr>{% endfor %}</table></div></div>"""
+<td style="text-align:right;color:{{ 'var(--olive)' if r.amount>0 else 'inherit' }}">{{ '+' if r.amount>0 }}{{ r.amount|money }}</td></tr>{% endfor %}</table></div></div>"""
 LEDGER_LABEL = {"deposit": "Added funds", "withdraw": "Withdrawal", "escrow_hold": "Paid into escrow",
                 "escrow_release": "Sale payout", "escrow_refund": "Refund"}
 
